@@ -1,4 +1,4 @@
-# LDN Chat Version: v3.10.5 (Layout Tweaks)
+# LDN Chat Version: v3.10.0 (Feature: Déjà Vu Toggle + Code Polish)
 import flet as ft
 import os
 import time
@@ -52,7 +52,34 @@ async def main(page: ft.Page):
     page.title = f"LDN Chat {APP_VERSION}"
     page.padding = 0
 
+    # --- AUDIO PLAYER ---
+    # --- AUDIO PLAYER (DISABLED FOR DEBUG) ---
+    # try:
+    #     print("DEBUG: Initializing global_audio_player...")
+    #     global_audio_player = fta.Audio(
+    #         src="about:blank",
+    #         autoplay=False
+    #     )
+    #     page.overlay.append(global_audio_player)
+    #     print("DEBUG: global_audio_player added to overlay.")
+    # except Exception as e:
+    #     print(f"CRITICAL: Failed to add Audio to overlay: {e}")
+
     file_picker = ft.FilePicker()
+
+    # FilePicker and SnackBar initialization (Disabled for stability)
+    # try:
+    #     feedback_snack = ft.SnackBar(content=ft.Text(""), duration=1500)
+    #     page.overlay.append(feedback_snack)
+    # except Exception as e:
+    #     print(f"CRITICAL: Failed to add SnackBar to overlay: {e}")
+
+    # try:
+    #     print("DEBUG: Registering FilePicker to overlay...")
+    #     page.overlay.append(file_picker)
+    #     print("DEBUG: FilePicker added to overlay.")
+    # except Exception as e:
+    #     print(f"CRITICAL: Failed to add FilePicker to overlay: {e}")
 
     # Check persistence early
     stored_user = None
@@ -87,6 +114,22 @@ async def main(page: ft.Page):
 
     async def play_audio_message(msg_uid, audio_ref):
         print(f"DEBUG: Audio playback requested for {msg_uid} but is temporarily disabled.")
+        # try:
+        #     if not audio_ref: return
+        #     feedback_snack.content.value = "Buffering from Cloud..."
+        #     feedback_snack.open = True
+        #     feedback_snack.update()
+        #
+        #     relative_url = await asyncio.to_thread(cache_audio_file, msg_uid, audio_ref)
+        #     if not relative_url: return
+        #
+        #     global_audio_player.src = f"{relative_url}?t={int(time.time())}"
+        #     global_audio_player.autoplay = True
+        #     global_audio_player.update()
+        #     await asyncio.sleep(0.1)
+        #     global_audio_player.play()
+        # except Exception as ex:
+        #     print(f"Playback error: {ex}")
 
     # --- INIT BACKEND ---
     print("DEBUG: Calling database.init_db()...")
@@ -208,6 +251,8 @@ async def main(page: ft.Page):
         # DOM CAPPING: Limit to 200 messages to maintain mobile performance
         if len(chat.controls) > 200:
             chat.controls = chat.controls[:200]
+            # Refresh message_controls mapping for consistency if needed
+            # (In reverse mode, index 0 is bottom, so we remove from the end/top)
 
         state["history_cursor"] = end_idx
         state["is_loading_history"] = False
@@ -236,6 +281,8 @@ async def main(page: ft.Page):
             await chat.scroll_to(offset=0, duration=duration, curve=curve)
         except Exception:
             pass
+
+    # Removed UI rendering logic (moved to ui_components.py)
 
     # --- INCOMING MESSAGE HANDLER ---
     async def handle_incoming_message(data, update_page=True):
@@ -442,6 +489,9 @@ async def main(page: ft.Page):
 
     file_picker.on_result = on_file_picked
 
+    # FilePicker moved to top of main
+
+
     # --- SEARCH OPTIMIZED ---
     async def perform_search(e):
         query = search_box.value
@@ -451,7 +501,7 @@ async def main(page: ft.Page):
         if query == state["last_search_query"]:
             return
         state["last_search_query"] = query
-
+        
         # Pre-compile search pattern once
         try:
             q_regex = re.escape(query)
@@ -476,9 +526,7 @@ async def main(page: ft.Page):
 
                 if bubble_container:
                     original_text = bubble_container.data
-                    is_match = query.lower() in original_text.lower()
-                    
-                    if is_match:
+                    if query.lower() in original_text.lower():
                         matches += 1
                         if not first_key: first_key = control.key
                         bubble_container.content = ft.Text(
@@ -502,6 +550,8 @@ async def main(page: ft.Page):
         search_box.label = f"{matches} matches"
         search_box.update()
         try:
+            # We remove 'key' as it is unsupported in this environment's Flet version.
+            # The search still highlights matches in the chat ListView.
             if first_key: await chat.scroll_to(offset=0, duration=500)
         except Exception as ex:
             print(f"Search scroll failed: {ex}")
@@ -566,39 +616,6 @@ async def main(page: ft.Page):
 
     uptime_text = ft.Text(size=12, color="#8e918f")
 
-    settings_sheet = ft.BottomSheet(
-        ft.Container(
-            ft.Column([
-                ft.Text("Settings", weight="bold", size=18, color="white"),
-                ft.Divider(color="#444746"),
-                typing_switch,
-                deja_vu_switch,
-                ft.Divider(color="#444746"),
-                ft.Text("Administrative", weight="bold", color="#8e918f"),
-                clear_button,
-                uptime_text
-            ], tight=True, spacing=15),
-            padding=30,
-            bgcolor="#1e1f20",
-            border_radius=ft.border_radius.vertical(top=28)
-        )
-    )
-    page.overlay.append(settings_sheet)
-
-    async def open_settings(e):
-        uptime_text.value = database.get_uptime()
-        settings_sheet.open = True
-        page.update()
-
-    settings_button = ft.IconButton(
-        icon=ft.Icons.SETTINGS,
-        icon_color="#c4c7c5",
-        on_click=open_settings,
-        tooltip="Settings",
-        scale=0.9
-    )
-
-
     async def logout_click(e):
         if hasattr(page, "client_storage"):
             page.client_storage.remove("user_name")
@@ -607,16 +624,49 @@ async def main(page: ft.Page):
         session_name.visible = False
         logout_button.visible = False
         
+        settings_sheet.open = False
         page.dialog = welcome_dlg
         welcome_dlg.open = True
         page.update()
 
-    logout_button = ft.IconButton(
+    logout_button = ft.ElevatedButton(
+        "Logout",
         icon=ft.Icons.LOGOUT,
-        icon_color="#c4c7c5",
         on_click=logout_click,
-        tooltip="Logout",
-        visible=False,
+        style=ft.ButtonStyle(color="white", bgcolor="#D32F2F"),
+        visible=True
+    )
+
+    async def open_settings(e):
+        uptime_text.value = database.get_uptime()
+        settings_sheet.open = True
+        page.update()
+
+    settings_sheet = ft.BottomSheet(
+        ft.Container(
+            ft.Column([
+                ft.Text("Settings", weight="bold", size=18, color="white"),
+                ft.Divider(color="#444746"),
+                typing_switch,
+                deja_vu_switch,
+                ft.Divider(color="#444746"),
+                logout_button,
+                clear_button,
+                ft.Divider(color="#444746"),
+                ft.Row([ft.Text("Server Uptime:", size=12, color="#8e918f"), uptime_text])
+            ], tight=True, spacing=15),
+            padding=30,
+            bgcolor="#1e1f20",
+            border_radius=ft.border_radius.vertical(top=28)
+        )
+    )
+    page.overlay.append(settings_sheet)
+
+    settings_button = ft.IconButton(
+        icon=ft.Icons.SETTINGS,
+        icon_color="#c4c7c5",
+        on_click=open_settings,
+        tooltip="Settings",
         scale=0.9
     )
 
@@ -669,6 +719,12 @@ async def main(page: ft.Page):
     input_container = ft.Container(
         content=ft.Row([
             timer_button,
+            # ft.IconButton(
+            #     icon=ft.Icons.ADD_CIRCLE_OUTLINE,
+            #     icon_color="#c4c7c5",
+            #     tooltip="Upload Audio (Disabled)",
+            #     on_click=lambda _: file_picker.pick_files(allow_multiple=False, address=ft.FilePickerFileType.AUDIO)
+            # ),
             new_message,
             send_button
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -679,39 +735,48 @@ async def main(page: ft.Page):
     )
 
     async def join_chat_click(e):
-        if not join_user_name.value:
-            join_user_name.error_text = "Name cannot be blank!"
-            join_user_name.update()
-            return
-
-        state["user_name"] = join_user_name.value
-        if hasattr(page, "client_storage"):
-            page.client_storage.set("user_name", state["user_name"])
-
-        welcome_dlg.open = False
-        session_avatar.visible = True
-        session_name.visible = True
-        session_name.value = state["user_name"]
-        session_avatar.content = ft.Text(state["user_name"][:1].upper(), color="#131314", weight="bold")
-        logout_button.visible = True
-        page.update()
-
-        # FETCH FULL HISTORY in background
-        state["full_history"] = await asyncio.to_thread(database.get_recent_messages)
-        state["history_cursor"] = 0
-        chat.controls.clear()
-        message_controls.clear()
-        
-        await load_history_chunk()
-        page.update()
-        
-        # Scroll to bottom (since index 0 is newest and reverse=True, this is offset 0)
-        await scroll_to_bottom(instant=True)
-        
         try:
-            await asyncio.to_thread(database.insert_message, state["user_name"], f"{state['user_name']} joined", "login_message")
+            print(f"DEBUG: join_chat_click starting for {join_user_name.value}")
+            if not join_user_name.value:
+                join_user_name.error_text = "Name cannot be blank!"
+                join_user_name.update()
+                return
+
+            state["user_name"] = join_user_name.value
+            if hasattr(page, "client_storage"):
+                page.client_storage.set("user_name", state["user_name"])
+
+            welcome_dlg.open = False
+            session_avatar.visible = True
+            session_name.visible = True
+            session_name.value = state["user_name"]
+            session_avatar.content = ft.Text(state["user_name"][:1].upper(), color="#131314", weight="bold")
+            logout_button.visible = True
+            page.update()
+
+            # FETCH FULL HISTORY in background
+            print("DEBUG: join_chat_click fetching history...")
+            state["full_history"] = await asyncio.to_thread(database.get_recent_messages)
+            state["history_cursor"] = 0
+            chat.controls.clear()
+            message_controls.clear()
+            
+            print("DEBUG: join_chat_click loading chunk...")
+            await load_history_chunk()
+            page.update()
+            
+            # Scroll to bottom (since index 0 is newest and reverse=True, this is offset 0)
+            await scroll_to_bottom(instant=True)
+            
+            try:
+                await asyncio.to_thread(database.insert_message, state["user_name"], f"{state['user_name']} joined", "login_message")
+            except Exception as e:
+                print(f"DEBUG: Join notification error: {e}")
+            print("DEBUG: join_chat_click finished.")
         except Exception as e:
-            pass
+            print(f"CRITICAL: join_chat_click FAILED: {e}")
+            import traceback
+            traceback.print_exc()
 
     # --- LOGIN DIALOG ---
     join_user_name = ft.TextField(
@@ -741,10 +806,12 @@ async def main(page: ft.Page):
         mobile_search_btn.visible = is_mobile
         if is_mobile:
             user_count_text.size = 10
-            session_name.visible = page.width > 400
+            session_name.visible = (page.width > 400 and state["user_name"] is not None)
+            session_avatar.visible = (state["user_name"] is not None)
         else:
             user_count_text.size = 12
-            session_name.visible = True
+            session_name.visible = state["user_name"] is not None
+            session_avatar.visible = state["user_name"] is not None
         page.update()
 
     page.on_resize = on_page_resize
@@ -778,8 +845,7 @@ async def main(page: ft.Page):
             ft.Row([
                 mobile_search_btn,
                 search_box,
-                settings_button,
-                logout_button
+                settings_button
             ], alignment=ft.MainAxisAlignment.END, tight=True)
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         padding=ft.padding.only(left=10, right=10, top=10, bottom=0),
@@ -816,7 +882,7 @@ async def main(page: ft.Page):
 
     if stored_user:
         join_user_name.value = stored_user
-        page.run_task(join_chat_click, None)
+        await join_chat_click(None)
     else:
         page.dialog = welcome_dlg
         welcome_dlg.open = True
