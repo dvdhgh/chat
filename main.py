@@ -522,7 +522,7 @@ async def main(page: ft.Page):
         chat.update()
         search_box.label = f"{matches} matches"
         search_box.update()
-        if first_key: await chat.scroll_to_async(key=first_key, duration=500)
+        if first_key: await chat.scroll_to(key=first_key, duration=500)
 
     async def clear_search(e):
         search_box.value = ""
