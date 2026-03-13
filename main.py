@@ -308,12 +308,14 @@ async def main(page: ft.Page):
         if update_page:
             try:
                 chat.update()
-                if uid_str not in message_controls: # This check is flawed but keeping same logic
-                    if not scroll_down_button.visible or msg.user_name == state["user_name"]:
-                        await scroll_to_bottom(instant=False)
+                # Scroll to bottom if user is at the bottom or it's their own message
+                if not scroll_down_button.visible or msg.user_name == state["user_name"]:
+                    await scroll_to_bottom(instant=False)
+
                 await update_typing_ui()
             except Exception:
                 pass
+
 
     # --- PUBSUB LISTENER ---
     async def on_pubsub_message(data):
@@ -409,7 +411,9 @@ async def main(page: ft.Page):
         page.update()
         try:
             print(f"DEBUG: App sending message. text={txt[:20]}..., is_temp={state['is_temp_mode']}")
-            database.insert_message(state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
+            # Use to_thread to prevent blocking the UI loop
+            await asyncio.to_thread(database.insert_message, state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
+
         except Exception as ex:
             print(f"Send Error: {ex}")
 
@@ -608,8 +612,10 @@ async def main(page: ft.Page):
         icon=ft.Icons.SETTINGS,
         icon_color="#c4c7c5",
         on_click=open_settings,
-        tooltip="Settings"
+        tooltip="Settings",
+        scale=0.9
     )
+
 
     async def logout_click(e):
         if hasattr(page, "client_storage"):
@@ -629,8 +635,10 @@ async def main(page: ft.Page):
         icon_color="#c4c7c5",
         on_click=logout_click,
         tooltip="Logout",
-        visible=False
+        visible=False,
+        scale=0.9
     )
+
 
     # --- HINTS & INPUT ---
     hint_choices = ["Ask anything...", "Type a message...", "Enter a prompt here..."]
@@ -751,61 +759,81 @@ async def main(page: ft.Page):
     )
     page.overlay.append(welcome_dlg)
 
-    # --- BUILD PAGE ---
-    # RESTORED: The 'header' definition block
-    header = ft.Container(
-        content=ft.Row([
-            ft.Row([user_session_info, ft.Container(width=10), user_count_text]),
-            ft.Row([search_box, settings_button, logout_button],
-                   vertical_alignment=ft.CrossAxisAlignment.CENTER)
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-        padding=ft.padding.only(left=20, right=20, top=10, bottom=0),
-        bgcolor=ui.PAGE_BG
+    # --- PAGE RESPONSIVENESS ---
+    def on_page_resize(e):
+        is_mobile = page.width < 600
+        search_box.visible = not is_mobile
+        mobile_search_btn.visible = is_mobile
+        if is_mobile:
+            user_count_text.size = 10
+            session_name.visible = page.width > 400
+        else:
+            user_count_text.size = 12
+            session_name.visible = True
+        page.update()
+
+    page.on_resize = on_page_resize
+
+    async def toggle_mobile_search(e):
+        search_box.visible = not search_box.visible
+        if search_box.visible:
+            mobile_search_btn.icon = ft.Icons.CLOSE
+            user_session_info.visible = False
+            user_count_text.visible = False
+            search_box.focus() # Ensure it's ready to type
+        else:
+            mobile_search_btn.icon = ft.Icons.SEARCH
+            user_session_info.visible = True
+            user_count_text.visible = True
+        page.update()
+
+    mobile_search_btn = ft.IconButton(
+        icon=ft.Icons.SEARCH,
+        icon_color="#c4c7c5",
+        visible=False,
+        on_click=toggle_mobile_search,
+        scale=0.9
     )
 
-    # Stack for Bottom-Left Toast Notification
-    main_layout = ft.Column(
-        controls=[
-            header,
-            ft.Stack([
-                chat_container,
-                ft.Container(content=scroll_down_button, bottom=10, right=45)
-            ], expand=True),
-
-            ft.Container(content=typing_text, padding=ft.padding.only(left=40, bottom=5)),
-
-            input_container
-        ], expand=True, spacing=0
+    # --- BUILD PAGE ---
+    header = ft.Container(
+        content=ft.Row([
+            user_session_info,
+            ft.Row([
+                user_count_text,
+                ft.Container(width=10),
+                search_box,
+                mobile_search_btn,
+                settings_button,
+                logout_button
+            ], alignment=ft.MainAxisAlignment.END)
+        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        padding=ft.padding.only(left=20, right=10, top=10, bottom=10),
+        bgcolor=ui.PAGE_BG,
     )
 
     page.add(
-        ft.Stack(
-            [
-                main_layout,
-                copy_banner
-            ],
-            expand=True
-        )
+        ft.Column([
+            header,
+            chat_container,
+            input_container
+        ], expand=True, spacing=0),
+        copy_banner
     )
 
+    # Initial Responsive Check
+    on_page_resize(None)
+
+    # --- INITIAL LOAD ---
     if stored_user:
         join_user_name.value = stored_user
-        page.run_task(join_chat_click, None)
+        await join_chat_click(None)
     else:
+        page.overlay.append(welcome_dlg)
         welcome_dlg.open = True
         page.update()
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 9090))
-    # Always run in web mode per user request
-    # host_addr: 0.0.0.0 for all environments to ensure WebSocket reliability
-    host_addr = "0.0.0.0"
-    
-    ft.app(
-        target=main,
-        port=port,
-        host=host_addr,
-        assets_dir="assets",
-        upload_dir="uploads",
-        view=ft.AppView.WEB_BROWSER
-    )
+    # Use 0.0.0.0 for Cloud Run, but 127.0.0.1 for local dev auto-open
+    host_addr = "0.0.0.0" if os.getenv("K_SERVICE") else "127.0.0.1"
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=9090, host=host_addr, assets_dir="assets", upload_dir="uploads")
