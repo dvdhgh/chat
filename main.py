@@ -308,7 +308,7 @@ async def main(page: ft.Page):
             chat.controls.insert(0, m)
             if msg.user_name in database.typing_status:
                 del database.typing_status[msg.user_name]
-
+ 
         # DOM CAPPING: Ensure the list doesn't grow indefinitely on mobile
         if len(chat.controls) > 200:
             removed = chat.controls.pop() # Remove oldest from the end
@@ -624,8 +624,11 @@ async def main(page: ft.Page):
         session_name.visible = False
         logout_button.visible = False
         
+        # Disable input when logged out
+        new_message.disabled = True
+        send_button.disabled = True
+        
         settings_sheet.open = False
-        page.dialog = welcome_dlg
         welcome_dlg.open = True
         page.update()
 
@@ -723,7 +726,7 @@ async def main(page: ft.Page):
             #     icon=ft.Icons.ADD_CIRCLE_OUTLINE,
             #     icon_color="#c4c7c5",
             #     tooltip="Upload Audio (Disabled)",
-            #     on_click=lambda _: file_picker.pick_files(allow_multiple=False, address=ft.FilePickerFileType.AUDIO)
+            #     on_click=lambda _: file_picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.AUDIO)
             # ),
             new_message,
             send_button
@@ -747,6 +750,11 @@ async def main(page: ft.Page):
                 page.client_storage.set("user_name", state["user_name"])
 
             welcome_dlg.open = False
+            
+            # Enable input when logged in
+            new_message.disabled = False
+            send_button.disabled = False
+            
             session_avatar.visible = True
             session_name.visible = True
             session_name.value = state["user_name"]
@@ -797,7 +805,7 @@ async def main(page: ft.Page):
         actions=[ft.TextButton("JOIN CHAT", on_click=join_chat_click)],
         bgcolor="#1e1f20",
     )
-    page.dialog = welcome_dlg
+    page.overlay.append(welcome_dlg)
 
     # --- PAGE RESPONSIVENESS ---
     def on_page_resize(e):
@@ -880,11 +888,13 @@ async def main(page: ft.Page):
         )
     )
 
-    if stored_user:
+    if stored_user and stored_user.strip():
         join_user_name.value = stored_user
         await join_chat_click(None)
     else:
-        page.dialog = welcome_dlg
+        # Ensure input is disabled if not joined
+        new_message.disabled = True
+        send_button.disabled = True
         welcome_dlg.open = True
         page.update()
 
