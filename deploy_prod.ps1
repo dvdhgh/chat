@@ -1,4 +1,6 @@
 # Production Deployment Script for LDN Chat
+# NOTE: After deployment, remember to push changes to GitHub using the GitHub MCP server,
+# as the local 'git' command may not be available or correctly configured.
 
 Write-Host "--- LOG: Starting Production Deployment to Cloud Run ---" -ForegroundColor Cyan
 Write-Host "Project: gen-lang-client-0351290071" -ForegroundColor Gray
@@ -20,8 +22,9 @@ gcloud run deploy ldn-chat-prod `
     --quiet
 
 if ($LASTEXITCODE -eq 0) {
+    $REAL_URL = gcloud run services describe ldn-chat-prod --project gen-lang-client-0351290071 --region europe-west1 --format='value(status.url)'
     Write-Host "`n--- LOG: Deployment Successful! ---" -ForegroundColor Green
-    Write-Host "Your app is live at: https://ldn-chat-prod-535455457834.europe-west1.run.app" -ForegroundColor Cyan
+    Write-Host "Your app is live at: $REAL_URL" -ForegroundColor Cyan
 } else {
     Write-Host "`n--- LOG: Deployment Failed with exit code $LASTEXITCODE ---" -ForegroundColor Red
 }
