@@ -3,14 +3,14 @@ import re
 import database
 
 # --- COLOR PALETTE ---
-PAGE_BG = \"#131314\"  # The main dark background
-CODE_BG = \"#282c34\"  # Matches 'ATOM_ONE_DARK' theme background
-BUBBLE_BG = \"#2A2A2A\"  # Standard message bubble
-TEXT_COLOR = \"#e3e3e3\"  # Main text
-SUB_TEXT = \"#c4c7c5\"  # Secondary text (headers, names)
+PAGE_BG = "#131314"  # The main dark background
+CODE_BG = "#282c34"  # Matches 'ATOM_ONE_DARK' theme background
+BUBBLE_BG = "#2A2A2A"  # Standard message bubble
+TEXT_COLOR = "#e3e3e3"  # Main text
+SUB_TEXT = "#c4c7c5"  # Secondary text (headers, names)
 
 # --- PRE-COMPILED PATTERNS ---
-URL_PATTERN = re.compile(r\"((?:https?://|www\.)\S+)\", re.IGNORECASE)
+URL_PATTERN = re.compile(r"((?:https?://|www\.)\S+)", re.IGNORECASE)
 
 def generate_spans(text, on_link_click, query_pattern=None, query_text=None):
     spans = []
@@ -23,10 +23,10 @@ def generate_spans(text, on_link_click, query_pattern=None, query_text=None):
 
         if URL_PATTERN.fullmatch(part):
             url_to_open = part
-            if part.lower().startswith(\"www.\"): url_to_open = f\"https://{part}\"
+            if part.lower().startswith("www."): url_to_open = f"https://{part}"
             spans.append(ft.TextSpan(
                 text=part,
-                style=ft.TextStyle(color=\"#8ab4f8\", decoration=ft.TextDecoration.UNDERLINE),
+                style=ft.TextStyle(color="#8ab4f8", decoration=ft.TextDecoration.UNDERLINE),
                 on_click=lambda e, u=url_to_open: on_link_click(u)
             ))
         else:
@@ -35,8 +35,8 @@ def generate_spans(text, on_link_click, query_pattern=None, query_text=None):
                 for sub in sub_parts:
                     if not sub: continue
                     if sub.lower() == query_text.lower():
-                        spans.append(ft.TextSpan(text=sub, style=ft.TextStyle(bgcolor=\"#F9A825\",
-                                                                              color=\"white\")))
+                        spans.append(ft.TextSpan(text=sub, style=ft.TextStyle(bgcolor="#F9A825",
+                                                                              color="white")))
                     else:
                         spans.append(ft.TextSpan(text=sub))
             else:
@@ -56,15 +56,15 @@ def create_message_content(text, trigger_copy_callback, on_tap_link):
     stripped = text.strip()
 
     # CODE BLOCK RENDERER (Specialized with Copy Header)
-    if stripped.startswith(\"```\"):
+    if stripped.startswith("```"):
         try:
             lines = stripped.split('\n')
             lang = lines[0].replace('```', '').strip()
-            if not lang: lang = \"Code\"
+            if not lang: lang = "Code"
 
             # Extract raw code for copying (strip triple backticks)
             raw_code = stripped
-            if stripped.startswith(\"```\") and stripped.endswith(\"```\"):
+            if stripped.startswith("```") and stripped.endswith("```"):
                 parts = stripped.split('\n')
                 if len(parts) > 2:
                     raw_code = '\n'.join(parts[1:-1])
@@ -72,12 +72,12 @@ def create_message_content(text, trigger_copy_callback, on_tap_link):
             # Header (Title Bar)
             header = ft.Container(
                 content=ft.Row([
-                    ft.Text(lang, size=12, weight=\"bold\", color=SUB_TEXT),
+                    ft.Text(lang, size=12, weight="bold", color=SUB_TEXT),
                     ft.IconButton(
                         icon=ft.Icons.CONTENT_COPY,
                         icon_size=16,
                         icon_color=SUB_TEXT,
-                        tooltip=\"Copy code\",
+                        tooltip="Copy code",
                         on_click=lambda e: trigger_copy_callback(raw_code)
                     )
                 ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
@@ -107,17 +107,17 @@ def create_message_content(text, trigger_copy_callback, on_tap_link):
     return get_message_markdown(text, on_tap_link)
 
 def create_chat_message(message: database.Message, current_user_name, trigger_copy_callback, on_tap_link, play_audio_callback):
-    u_name = message.user_name if message.user_name else \"Unknown\"
+    u_name = message.user_name if message.user_name else "Unknown"
     is_me = u_name == current_user_name
 
-    if message.message_type == \"login_message\":
+    if message.message_type == "login_message":
         return ft.Row(
             key=str(message.uid),
             alignment=ft.MainAxisAlignment.CENTER,
-            controls=[ft.Text(value=message.text, size=11, color=\"#8e918f\", italic=True)]
+            controls=[ft.Text(value=message.text, size=11, color="#8e918f", italic=True)]
         )
 
-    if message.message_type == \"analysis_message\" or u_name == \"ARCHIVE\":
+    if message.message_type == "analysis_message" or u_name == "ARCHIVE":
         return ft.Row(
             key=str(message.uid),
             vertical_alignment=ft.CrossAxisAlignment.START,
@@ -132,37 +132,37 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
         )
 
     def get_avatar_color(user_name: str):
-        if not user_name: user_name = \"default\"
-        clist = [\"#8ab4f8\", \"#81c995\", \"#f28b82\", \"#fdd663\", \"#c58af9\", \"#78d9ec\"]
+        if not user_name: user_name = "default"
+        clist = ["#8ab4f8", "#81c995", "#f28b82", "#fdd663", "#c58af9", "#78d9ec"]
         return clist[hash(user_name) % len(clist)]
 
     content_control = None
-    if message.message_type == \"audio_message\":
+    if message.message_type == "audio_message":
         if message.audio_data:
             async def on_play_click(e):
                 await play_audio_callback(message.uid, message.audio_data)
 
             content_control = ft.Container(
                 content=ft.Row([
-                    ft.IconButton(content=ft.Icon(ft.Icons.PLAY_ARROW, color=\"#131314\"),
+                    ft.IconButton(content=ft.Icon(ft.Icons.PLAY_ARROW, color="#131314"),
                                   on_click=on_play_click),
-                    ft.Text(\"Audio Message\", italic=True, size=13, color=\"#131314\")
+                    ft.Text("Audio Message", italic=True, size=13, color="#131314")
                 ], tight=True),
                 bgcolor=TEXT_COLOR, border_radius=18, padding=5, width=170
             )
         else:
             content_control = ft.Container(
                 content=ft.Row([
-                    ft.ProgressRing(width=16, height=16, stroke_width=2, color=\"#8e918f\"),
-                    ft.Text(\"Processing...\", italic=True, size=12, color=\"#8e918f\")
+                    ft.ProgressRing(width=16, height=16, stroke_width=2, color="#8e918f"),
+                    ft.Text("Processing...", italic=True, size=12, color="#8e918f")
                 ], tight=True),
                 padding=10
             )
 
     else:
-        is_code = message.text.strip().startswith(\"```\")
+        is_code = message.text.strip().startswith("```")
         is_long = len(message.text) > 400 or message.text.count('\n') > 10
-        is_markdown = any(char in message.text for char in [\"*\", \"_\", \"`\", \"[\", \"#\", \"|\"])
+        is_markdown = any(char in message.text for char in ["*", "_", "`", "[", "#", "|"])
 
         if is_code:
             content_control = create_message_content(message.text, trigger_copy_callback, on_tap_link)
@@ -175,7 +175,7 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
                 size=15,
                 color=TEXT_COLOR,
                 data=message.text,
-                font_family=\"Roboto, sans-serif\",
+                font_family="Roboto, sans-serif",
                 weight=ft.FontWeight.W_400,
                 max_lines=10 if is_long else None,
                 overflow=ft.TextOverflow.ELLIPSIS if is_long else None,
@@ -184,9 +184,9 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
             if is_long:
                 expand_btn = ft.IconButton(
                     icon=ft.Icons.KEYBOARD_ARROW_DOWN,
-                    icon_color=\"#8e918f\",
+                    icon_color="#8e918f",
                     icon_size=20,
-                    tooltip=\"Expand text\",
+                    tooltip="Expand text",
                     style=ft.ButtonStyle(padding=0, shape=ft.CircleBorder()),
                     data=False
                 )
@@ -229,7 +229,7 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
         content=ft.Column([
             ft.Text(u_name, size=11, color=SUB_TEXT, visible=not is_me),
             content_control,
-            ft.Text(message.timestamp, size=9, color=\"#8e918f\", text_align=ft.TextAlign.RIGHT)
+            ft.Text(message.timestamp, size=9, color="#8e918f", text_align=ft.TextAlign.RIGHT)
         ], spacing=2, horizontal_alignment=ft.CrossAxisAlignment.START),
 
         bgcolor=BUBBLE_BG,
@@ -244,7 +244,7 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
         alignment=ft.MainAxisAlignment.END if is_me else ft.MainAxisAlignment.START,
         controls=[
             ft.CircleAvatar(
-                content=ft.Text(u_name[:1].upper(), color=\"#131314\", weight=\"bold\"),
+                content=ft.Text(u_name[:1].upper(), color="#131314", weight="bold"),
                 bgcolor=get_avatar_color(u_name),
                 radius=14,
                 visible=not is_me
