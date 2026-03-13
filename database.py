@@ -168,6 +168,11 @@ def on_messages_snapshot(col_snapshot, changes, read_time):
                 "audio_data": doc.get("audio_data"), 
                 "db_id": change.document.id
             })
+        elif change.type.name == 'REMOVED':
+            doc = change.document.to_dict()
+            uid = doc.get("uid")
+            print(f"Backend: Firestore REMOVED detected for UID: {uid}")
+            broadcast({"message_type": "delete_message", "uid": uid})
 
 def on_typing_snapshot(col_snapshot, changes, read_time):
     for change in changes:
@@ -341,16 +346,46 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
         })
         
         doc_ref = db.collection("messages").document()
-        doc_ref.set({
+        base_data = {
             "user_name": user_name,
             "text": text,
             "message_type": message_type,
             "timestamp": now_obj,
             "uid": new_uid,
             "audio_data": audio_payload
-        })
+        }
+        
+        if is_temp:
+            print(f"DEBUG: Setting expiry for temporary message {new_uid}")
+            base_data["expires_at"] = now_obj + timedelta(seconds=60)
+            
+        doc_ref.set(base_data)
     except Exception as e:
         print(f"CRITICAL: Firestore Insert Failed: {e}")
+
+    # --- 3. ANALYTICS: OBSERVER NODE ---
+    if BOT_ENABLED and message_type == "chat_message":
+        with buffer_lock:
+            current_time = time.time()
+            if analysis_buffer:
+                if current_time - buffer_start_time > TRAFFIC_WINDOW:
+                    analysis_buffer = []
+
+            if not analysis_buffer: buffer_start_time = current_time
+
+            analysis_buffer.append(f"{user_name}: {text}")
+
+            if len(analysis_buffer) >= ANALYSIS_TRIGGER:
+                elapsed = current_time - buffer_start_time
+                transcript_snapshot = "\n".join(analysis_buffer)
+                analysis_buffer = []
+
+                if elapsed <= TRAFFIC_WINDOW:
+                    threading.Thread(target=_run_gemini_background, args=(transcript_snapshot,), daemon=True).start()
+
+    if is_temp:
+        print(f"DEBUG: Starting delete_later thread for {new_uid}")
+        threading.Thread(target=delete_later, args=(new_uid, 60), daemon=True).start()
 
 def _check_deja_vu_async(text, now_obj, ui_ts):
     try:
@@ -376,37 +411,22 @@ def _check_deja_vu_async(text, now_obj, ui_ts):
     except Exception as e:
         print(f"Deja Vu Error: {e}")
 
-    # --- 3. ANALYTICS: OBSERVER NODE ---
-    if BOT_ENABLED and message_type == "chat_message":
-        with buffer_lock:
-            current_time = time.time()
-            if analysis_buffer:
-                if current_time - buffer_start_time > TRAFFIC_WINDOW:
-                    analysis_buffer = []
-
-            if not analysis_buffer: buffer_start_time = current_time
-
-            analysis_buffer.append(f"{user_name}: {text}")
-
-            if len(analysis_buffer) >= ANALYSIS_TRIGGER:
-                elapsed = current_time - buffer_start_time
-                transcript_snapshot = "\n".join(analysis_buffer)
-                analysis_buffer = []
-
-                if elapsed <= TRAFFIC_WINDOW:
-                    threading.Thread(target=_run_gemini_background, args=(transcript_snapshot,), daemon=True).start()
-
-    if is_temp:
-        threading.Thread(target=delete_later, args=(new_uid, 60), daemon=True).start()
-
 def delete_later(uid, delay):
+    print(f"DEBUG: delete_later called for {uid} with delay {delay}")
     time.sleep(delay)
     # Firestore delete
     try:
+        print(f"DEBUG: Attempting Firestore deletion for {uid}")
         docs = db.collection("messages").where(filter=firestore.FieldFilter("uid", "==", uid)).stream()
+        found = False
         for doc in docs:
             doc.reference.delete()
-    except:
+            print(f"DEBUG: Deleted document {doc.id} for UID {uid}")
+            found = True
+        if not found:
+            print(f"DEBUG: No document found for UID {uid} during deletion")
+    except Exception as e:
+        print(f"DEBUG: Error in delete_later for {uid}: {e}")
         pass
     broadcast({"message_type": "delete_message", "uid": uid})
 
@@ -416,8 +436,18 @@ def get_recent_messages(limit=50):
         print("DATABASE: get_recent_messages - Streaming from Firestore...")
         # Get latest 50 messages ordered by timestamp
         docs = db.collection("messages").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit).stream(timeout=5.0)
+        
+        now = datetime.now()
         for doc in docs:
             r = doc.to_dict()
+            
+            # Check for expiration
+            expires_at = r.get("expires_at")
+            if expires_at and hasattr(expires_at, "replace"):
+                if expires_at.replace(tzinfo=None) < now:
+                    print(f"DEBUG: Skipping expired message {r.get('uid')}")
+                    continue
+
             raw_ts = r.get("timestamp")
             
             # Firestore timestamp to UI string

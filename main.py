@@ -408,6 +408,7 @@ async def main(page: ft.Page):
         new_message.value = ""
         page.update()
         try:
+            print(f"DEBUG: App sending message. text={txt[:20]}..., is_temp={state['is_temp_mode']}")
             database.insert_message(state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
         except Exception as ex:
             print(f"Send Error: {ex}")
@@ -637,6 +638,7 @@ async def main(page: ft.Page):
 
     async def toggle_timer(e):
         state["is_temp_mode"] = not state["is_temp_mode"]
+        print(f"DEBUG: Toggle Timer: is_temp_mode={state['is_temp_mode']}")
         if state["is_temp_mode"]:
             timer_button.icon_color = "#f28b82"  # Pastel Red
             new_message.hint_text = "Temporary message (60s)..."
