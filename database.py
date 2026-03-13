@@ -19,82 +19,37 @@ def is_emulator_ready(host_port):
     if not host_port: return False
     try:
         host, port = host_port.split(":")
-        # Simple retry loop
-        for _ in range(3):
-            try:
-                with socket.create_connection((host, int(port)), timeout=1):
-                    return True
-            except:
-                time.sleep(1)
-        return False
+        # Optimization: Only 1 retry with short timeout to avoid long hangs
+        with socket.create_connection((host, int(port)), timeout=0.5):
+            return True
     except:
         return False
 
-# Initialize Clients
-# Emulator Support
-FIRESTORE_EMULATOR_HOST = os.getenv("FIRESTORE_EMULATOR_HOST")
-STORAGE_EMULATOR_HOST = os.getenv("STORAGE_EMULATOR_HOST")
-
-if FIRESTORE_EMULATOR_HOST:
-    if is_emulator_ready(FIRESTORE_EMULATOR_HOST):
-        print(f"Backend: Using Firestore Emulator at {FIRESTORE_EMULATOR_HOST}")
-        os.environ["FIRESTORE_EMULATOR_HOST"] = FIRESTORE_EMULATOR_HOST
-        db = firestore.Client(project=PROJECT_ID)
-    else:
-        print(f"WARNING: Firestore Emulator not reachable at {FIRESTORE_EMULATOR_HOST}. Unsetting host to avoid hangs.")
-        if "FIRESTORE_EMULATOR_HOST" in os.environ: del os.environ["FIRESTORE_EMULATOR_HOST"]
-        db = firestore.Client(project=PROJECT_ID)
-else:
-    db = firestore.Client(project=PROJECT_ID)
-
-sm = secretmanager.SecretManagerServiceClient()
-
-if STORAGE_EMULATOR_HOST:
-    if is_emulator_ready(STORAGE_EMULATOR_HOST):
-        print(f"Backend: Using Storage Emulator at {STORAGE_EMULATOR_HOST}")
-        os.environ["STORAGE_EMULATOR_HOST"] = STORAGE_EMULATOR_HOST
-        storage_client = storage.Client(project=PROJECT_ID)
-    else:
-        print(f"WARNING: Storage Emulator not reachable at {STORAGE_EMULATOR_HOST}. Unsetting host.")
-        if "STORAGE_EMULATOR_HOST" in os.environ: del os.environ["STORAGE_EMULATOR_HOST"]
-        storage_client = storage.Client(project=PROJECT_ID)
-else:
-    storage_client = storage.Client(project=PROJECT_ID)
+# Global Clients (Initialized lazily in init_db)
+db = None
+storage_client = None
+sm = None
+gemini_client = None
+BOT_ENABLED = False
+DEJA_VU_ENABLED = False
+GEMINI_KEY = None
+_db_initialized = False
 
 def get_secret(secret_id, version_id="latest"):
+    global sm
+    if sm is None:
+        sm = secretmanager.SecretManagerServiceClient()
     name = f"projects/{PROJECT_ID}/secrets/{secret_id}/versions/{version_id}"
     response = sm.access_secret_version(request={"name": name})
     return response.payload.data.decode("UTF-8")
 
-GEMINI_KEY = None
-try:
-    GEMINI_KEY = get_secret(SECRET_ID)
-except Exception as e:
-    print(f"Backend: Secret Error: {e}")
-    # Fallback to env for local dev if secret not found
-    GEMINI_KEY = os.getenv("GEMINI_API_KEY")
-
-gemini_client = None
-BOT_ENABLED = False
-
-if GEMINI_KEY:
-    try:
-        gemini_client = genai.Client(api_key=GEMINI_KEY)
-        BOT_ENABLED = True
-        print("Backend: Gemini Bot Enabled.")
-    except Exception as e:
-        print(f"Backend: Gemini Config Error: {e}")
-
 CACHE_DIR = "assets/cache"
-UPLOAD_DIR = "uploads" # Still used for temporary buffering before GCS upload
+UPLOAD_DIR = "uploads"
 
 # --- STATE ---
 analysis_buffer = []
-# The "Memory" of the last observation
 last_observation = "The channel is silent."
-# The "Lens" (Default personality)
 observer_lens = "concise, slightly dry, insightful, and technical"
-
 ANALYSIS_TRIGGER = 10
 TRAFFIC_WINDOW = 60.0
 buffer_start_time = 0.0
@@ -113,7 +68,7 @@ class Message:
         self.timestamp = timestamp
         self.uid = uid
         self.audio_data = audio_data
-        self.db_id = db_id # Firestore document ID
+        self.db_id = db_id
 
     def to_dict(self):
         return {
@@ -129,36 +84,29 @@ def unregister_session(pubsub):
         local_sessions.remove(pubsub)
 
 def broadcast(message_data):
-    # Flet's pubsub is global for the app scope. 
-    # Calling send_all on ANY active session's pubsub object broadcasts to ALL sessions.
     if not local_sessions:
         return
-        
     def _do_broadcast():
         for session in list(local_sessions):
             try:
                 session.send_all(message_data)
-                return # SUCCESS! One send_all is enough for global pubsub
+                return
             except:
-                # If this session is dead, remove and try next
                 if session in local_sessions:
                     local_sessions.remove(session)
-    
     threading.Thread(target=_do_broadcast, daemon=True).start()
-    
 
 # --- FIRESTORE LISTENERS ---
 def on_messages_snapshot(col_snapshot, changes, read_time):
     for change in changes:
-        if str(change.type).split('.')[-1] == 'ADDED':
+        type_str = str(change.type).split('.')[-1]
+        if type_str == 'ADDED':
             doc = change.document.to_dict()
             raw_ts = doc.get("timestamp")
-            # Convert Firestore timestamp to UI string
             if hasattr(raw_ts, "strftime"):
                 final_ts = raw_ts.strftime("%H:%M")
             else:
                 final_ts = str(raw_ts)
-            
             broadcast({
                 "user_name": doc.get("user_name"), 
                 "text": doc.get("text"), 
@@ -168,43 +116,75 @@ def on_messages_snapshot(col_snapshot, changes, read_time):
                 "audio_data": doc.get("audio_data"), 
                 "db_id": change.document.id
             })
-        elif str(change.type).split('.')[-1] == 'REMOVED':
+        elif type_str == 'REMOVED':
             doc = change.document.to_dict()
             uid = doc.get("uid")
-            print(f"Backend: Firestore REMOVED detected for UID: {uid}")
             broadcast({"message_type": "delete_message", "uid": uid})
 
 def on_typing_snapshot(col_snapshot, changes, read_time):
     for change in changes:
-        if str(change.type).split('.')[-1] == 'ADDED':
+        type_str = str(change.type).split('.')[-1]
+        if type_str == 'ADDED':
             doc = change.document.to_dict()
             broadcast({"message_type": "typing_signal", "user_name": doc.get("user_name")})
 
-_db_initialized = False
-
 def init_db():
-    global _db_initialized, typing_status
+    global db, storage_client, sm, gemini_client, BOT_ENABLED, GEMINI_KEY, _db_initialized
     if _db_initialized:
-        print("Backend: DB already initialized, skipping.")
         return
     _db_initialized = True
     
+    print("Backend: Initializing Database Clients...")
+    
+    # Firestore Client
+    f_host = os.getenv("FIRESTORE_EMULATOR_HOST")
+    if f_host and is_emulator_ready(f_host):
+        print(f"Backend: Using Firestore Emulator at {f_host}")
+        os.environ["FIRESTORE_EMULATOR_HOST"] = f_host
+    elif f_host:
+        print(f"WARNING: Firestore Emulator not reachable. Falling back.")
+        if "FIRESTORE_EMULATOR_HOST" in os.environ: del os.environ["FIRESTORE_EMULATOR_HOST"]
+    db = firestore.Client(project=PROJECT_ID)
+
+    # Storage Client
+    s_host = os.getenv("STORAGE_EMULATOR_HOST")
+    if s_host and is_emulator_ready(s_host):
+        print(f"Backend: Using Storage Emulator at {s_host}")
+        os.environ["STORAGE_EMULATOR_HOST"] = s_host
+    elif s_host:
+        if "STORAGE_EMULATOR_HOST" in os.environ: del os.environ["STORAGE_EMULATOR_HOST"]
+    storage_client = storage.Client(project=PROJECT_ID)
+
+    # Gemini Client
+    try:
+        GEMINI_KEY = get_secret(SECRET_ID)
+    except Exception as e:
+        print(f"Backend: Secret Error, trying env: {e}")
+        GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+
+    if GEMINI_KEY:
+        try:
+            gemini_client = genai.Client(api_key=GEMINI_KEY)
+            BOT_ENABLED = True
+            print("Backend: Gemini Bot Enabled.")
+        except Exception as e:
+            print(f"Backend: Gemini Config Error: {e}")
+
     os.makedirs(CACHE_DIR, exist_ok=True)
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     
-    # Start Real-time Listeners
-    # We only listen for messages created AFTER Now to avoid duplicate historical loads on start
-    now = datetime.now()
-    print("Backend: Starting Firestore Listeners...")
-    try:
-        # We always attempt to start listeners. If we are using emulator, it connects there.
-        # If emulator is missing, it falls back to production (if credentials allow).
-        db.collection("messages").where(filter=firestore.FieldFilter("timestamp", ">", now)).on_snapshot(on_messages_snapshot)
-        db.collection("typing_signals").on_snapshot(on_typing_snapshot)
-        print("Backend: Firestore Listeners requested.")
-    except Exception as e:
-        print(f"Backend: Listener Error (might be offline): {e}")
-    
+    # Start Real-time Listeners in background thread to avoid blocking main thread
+    def start_listeners():
+        now = datetime.now()
+        print("Backend: Starting Firestore Listeners...")
+        try:
+            db.collection("messages").where(filter=firestore.FieldFilter("timestamp", ">", now)).on_snapshot(on_messages_snapshot)
+            db.collection("typing_signals").on_snapshot(on_typing_snapshot)
+            print("Backend: Firestore Listeners requested.")
+        except Exception as e:
+            print(f"Backend: Listener Error (might be offline): {e}")
+
+    threading.Thread(target=start_listeners, daemon=True).start()
     threading.Thread(target=_signal_cleanup_loop, daemon=True).start()
 
 def get_uptime():

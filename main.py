@@ -133,7 +133,7 @@ async def main(page: ft.Page):
 
     # --- INIT BACKEND ---
     print("DEBUG: Calling database.init_db()...")
-    database.init_db() # Idempotent call
+    await asyncio.to_thread(database.init_db) # Idempotent call
     
     print("DEBUG: Registering session with database...")
     database.register_session(page.pubsub)
@@ -298,303 +298,150 @@ async def main(page: ft.Page):
         )
         
         if uid_str in message_controls:
-            existing_control = message_controls[uid_str]
-            try:
-                idx = chat.controls.index(existing_control)
-                chat.controls[idx] = m
-            except ValueError:
-                chat.controls.insert(0, m)
+            # Update existing
+            old_control = message_controls[uid_str]
+            idx = chat.controls.index(old_control)
+            chat.controls[idx] = m
+            message_controls[uid_str] = m
         else:
+            # Add new
             chat.controls.insert(0, m)
-            if msg.user_name in database.typing_status:
-                del database.typing_status[msg.user_name]
- 
-        # DOM CAPPING: Ensure the list doesn't grow indefinitely on mobile
-        if len(chat.controls) > 200:
-            removed = chat.controls.pop() # Remove oldest from the end
-            # Cleanup message_controls to prevent memory leak
-            if hasattr(removed, 'key') and removed.key in message_controls:
-                del message_controls[removed.key]
-        
-        message_controls[uid_str] = m
+            message_controls[uid_str] = m
+            # If we were at the bottom (offset 0), stay at the bottom
+            # Actually with reverse=True, adding to index 0 is adding to the bottom
+            
+            # DOM CAPPING
+            if len(chat.controls) > 200:
+                chat.controls = chat.controls[:200]
 
         if update_page:
-            try:
-                chat.update()
-                # Scroll to bottom if user is at the bottom or it's their own message
-                if not scroll_down_button.visible or msg.user_name == state["user_name"]:
-                    await scroll_to_bottom(instant=False)
+            chat.update()
+            page.update()
 
-                await update_typing_ui()
-            except Exception:
-                pass
+    # --- PUBSUB HANDLER ---
+    async def on_broadcast(data):
+        if not page_alive: return
 
-
-    # --- PUBSUB LISTENER ---
-    async def on_pubsub_message(data):
-        if isinstance(data, dict):
-            if data.get("message_type") == "clear_signal":
-                chat.controls.clear()
-                message_controls.clear()
-                state["last_msg_id"] = 0
-                page.update()
-                return
-            if data.get("message_type") == "delete_message":
-                uid_to_delete = str(data.get("uid"))
-                if uid_to_delete in message_controls:
-                    control = message_controls.pop(uid_to_delete)
-                    try:
-                        chat.controls.remove(control)
-                        page.update()
-                    except ValueError:
-                        pass
-                return
-            if data.get("message_type") == "typing_signal":
-                u_name = data.get("user_name")
-                if settings["typing_enabled"] and u_name != state["user_name"]:
-                    database.typing_status[u_name] = time.time()
-                    await update_typing_ui()
-                return
-            if data.get("message_type") == "user_count":
-                user_count_text.value = f"{data.get('count', 0)} online"
-                user_count_text.update()
-                return
-            if data.get("message_type") == "audio_message" and not data.get("audio_data"):
-                await handle_incoming_message(data)
-                return
-            await handle_incoming_message(data)
-
-    page.pubsub.subscribe(on_pubsub_message)
-
-    # --- TYPING INDICATOR LOGIC ---
-    typing_text = ft.Text(value="", italic=True, color="#8e918f", size=12, visible=False)
-
-    async def update_typing_ui():
-        if not settings["typing_enabled"]:
-            if typing_text.visible:
-                typing_text.visible = False
-                typing_text.update()
+        m_type = data.get("message_type")
+        
+        if m_type == "clear_signal":
+            chat.controls.clear()
+            message_controls.clear()
+            chat.update()
+            page.update()
             return
-        now = time.time()
-        active = [u for u, ts in database.typing_status.items()
-                  if now - ts < database.DECAY_TIMEOUT
-                  and u != state["user_name"]]
-        if active:
-            typing_text.value = f"{active[0]} is typing..." if len(active) == 1 else "Multiple people typing..."
-            typing_text.visible = True
-        else:
-            typing_text.visible = False
-        typing_text.update()
 
-    async def typing_cleanup_loop():
-        while page_alive:
-            await asyncio.sleep(2)
-            if typing_text.visible: await update_typing_ui()
+        if m_type == "delete_message":
+            uid = data.get("uid")
+            if uid in message_controls:
+                ctrl = message_controls.pop(uid)
+                if ctrl in chat.controls:
+                    chat.controls.remove(ctrl)
+                    chat.update()
+                    page.update()
+            return
 
-    page.run_task(typing_cleanup_loop)
+        if m_type == "typing_signal":
+            u_name = data.get("user_name")
+            if u_name == state["user_name"]: return
+            
+            database.typing_status[u_name] = time.time()
+            return
 
-    # --- INPUT HANDLERS ---
-    async def on_send_click(e):
-        txt = new_message.value
-        if not txt: return
+        # Handle Standard Messages (Chat, Analysis, System, Login)
+        await handle_incoming_message(data)
 
-        if txt.strip() == "/help":
-            help_text = "**Commands:**\n`/lens <style>`\n`/capsule <60s> <msg>`\n`/help`"
-            help_msg = database.Message(
-                user_name="SYSTEM",
-                text=help_text,
-                message_type="analysis_message",
-                timestamp=datetime.datetime.now().strftime("%H:%M"),
-                uid=str(uuid.uuid4())
-            )
-            chat.controls.insert(0, ui.create_chat_message(
-                help_msg, 
+    page.pubsub.on_message = on_broadcast
+
+    # --- SEARCH LOGIC ---
+    search_results = []
+    search_cursor = 0
+    search_active = False
+
+    async def execute_search(query):
+        nonlocal search_active, search_results, search_cursor
+        query = query.lower().strip()
+        state["last_search_query"] = query
+        
+        if not query:
+            search_active = False
+            search_results = []
+            # Restore normal view
+            chat.controls.clear()
+            message_controls.clear()
+            state["history_cursor"] = 0
+            await load_history_chunk()
+            await scroll_to_bottom(instant=True)
+            return
+
+        search_active = True
+        # Filter from FULL history (local)
+        search_results = [m for m in state["full_history"] if query in m.text.lower() or query in m.user_name.lower()]
+        
+        chat.controls.clear()
+        message_controls.clear()
+        
+        # Display first batch of results
+        display_count = min(len(search_results), HISTORY_BATCH_SIZE)
+        for i in range(display_count):
+            msg = search_results[i]
+            m = ui.create_chat_message(
+                msg, 
                 state["user_name"], 
                 trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
                 on_tap_link=page.launch_url,
                 play_audio_callback=play_audio_message
-            ))
-            new_message.value = ""
-            chat.update()
-            new_message.update()
-            await scroll_to_bottom(instant=False)
-            return
-
-        new_message.value = ""
-        page.update()
-        try:
-            print(f"DEBUG: App sending message. text={txt[:20]}..., is_temp={state['is_temp_mode']}")
-            # Use to_thread to prevent blocking the UI loop
-            await asyncio.to_thread(database.insert_message, state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
-
-        except Exception as ex:
-            print(f"Send Error: {ex}")
-
-    async def on_input_change(e):
-        now = time.time()
-        if state["user_name"] and (now - state["last_typing_sent"] > HEARTBEAT_INTERVAL):
-            state["last_typing_sent"] = now
-            database.send_typing_signal(state["user_name"])
-
-    # --- FILE UPLOAD (AUDIO) ---
-    async def on_file_picked(e):
-        if e.files:
-            file_obj = e.files[0]
-            new_uid = str(uuid.uuid4())
-            ts = datetime.datetime.now().strftime("%H:%M")
-            safe_user = "".join(x for x in state["user_name"] if x.isalnum())
-            filename = f"{safe_user}_{new_uid}.m4a"
-            placeholder_data = {
-                "user_name": state["user_name"],
-                "text": "Uploading...",
-                "message_type": "audio_message",
-                "timestamp": ts,
-                "uid": new_uid,
-                "audio_data": None
-            }
-            await handle_incoming_message(placeholder_data)
-            upload_url = page.get_upload_url(filename, 600)
-            file_picker.upload([ft.FilePickerUploadFile(file_obj.name, upload_url=upload_url)])
-
-            async def process_upload_background(fname, target_uid):
-                attempts = 0
-                full_path = os.path.join(database.UPLOAD_DIR, fname)
-                while attempts < 20:
-                    if os.path.exists(full_path):
-                        await asyncio.sleep(1)
-                        try:
-                            # Upload to GCS (Offload blocking network call)
-                            bucket = database.storage_client.bucket(database.BUCKET_NAME)
-                            blob = bucket.blob(fname)
-                            await asyncio.to_thread(blob.upload_from_filename, full_path)
-                            gcs_uri = f"gs://{database.BUCKET_NAME}/{fname}"
-                            
-                            await asyncio.to_thread(
-                                database.insert_message,
-                                state["user_name"],
-                                "Audio Message",
-                                "audio_message",
-                                is_temp=state["is_temp_mode"],
-                                audio_payload=gcs_uri
-                            )
-                            await asyncio.to_thread(os.remove, full_path)
-                            return
-                        except Exception as ex:
-                            print(f"GCS Upload error: {ex}")
-                            return
-                    await asyncio.sleep(1)
-                    attempts += 1
-
-            page.run_task(process_upload_background, filename, new_uid)
-
-    file_picker.on_result = on_file_picked
-
-    # FilePicker moved to top of main
-
-
-    # --- SEARCH OPTIMIZED ---
-    async def perform_search(e):
-        query = search_box.value
-        if not query: return await clear_search(e)
-        
-        # Optimization: Don't re-run if query is identical
-        if query == state["last_search_query"]:
-            return
-        state["last_search_query"] = query
-        
-        # Pre-compile search pattern once
-        try:
-            q_regex = re.escape(query)
-            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
-        except Exception:
-            query_pattern = None
-
-        matches = 0
-        first_key = None
-        processed_count = 0
-        
-        for control in reversed(chat.controls):
-            processed_count += 1
-            if processed_count % 10 == 0:
-                await asyncio.sleep(0) # Yield for UI responsiveness
-
-            if isinstance(control, ft.Row) and len(control.controls) > 1:
-                bubble_container = None
-                for c in control.controls:
-                    if isinstance(c, ft.Container) and c.data:
-                        bubble_container = c
-
-                if bubble_container:
-                    original_text = bubble_container.data
-                    if query.lower() in original_text.lower():
-                        matches += 1
-                        if not first_key: first_key = control.key
-                        bubble_container.content = ft.Text(
-                            spans=ui.generate_spans(original_text, page.launch_url, query_pattern=query_pattern, query_text=query),
-                            selectable=True,
-                            size=15,
-                            color="#e3e3e3",
-                            font_family="Roboto, sans-serif"
-                        )
-                    else:
-                        # Selective re-rendering: Only revert if it was previously highlighted
-                        # This avoids expensive Markdown re-builds for non-matches
-                        if isinstance(bubble_container.content, ft.Text) and bubble_container.content.spans:
-                            bubble_container.content = ui.create_message_content(
-                                original_text,
-                                trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
-                                on_tap_link=page.launch_url
-                            )
-
+            )
+            chat.controls.append(m)
+            message_controls[str(msg.uid)] = m
+            
         chat.update()
-        search_box.label = f"{matches} matches"
-        search_box.update()
-        try:
-            # We remove 'key' as it is unsupported in this environment's Flet version.
-            # The search still highlights matches in the chat ListView.
-            if first_key: await chat.scroll_to(offset=0, duration=500)
-        except Exception as ex:
-            print(f"Search scroll failed: {ex}")
-
-    async def clear_search(e):
-        search_box.value = ""
-        search_box.label = "Search"
-        state["history_cursor"] = 0
-        chat.controls.clear()
-        await load_history_chunk()
         page.update()
+
+    async def on_search_change(e):
+        # We use a small delay to avoid thrashing during typing
+        await asyncio.sleep(0.3)
+        if e.control.value == state["last_search_query"]:
+            await execute_search(e.control.value)
 
     search_box = ft.TextField(
-        label="Search",
-        width=250,
+        hint_text="Search messages...",
+        prefix_icon=ft.Icons.SEARCH,
+        on_change=on_search_change,
+        bgcolor="#1e1f20",
+        border_radius=20,
+        border_color="transparent",
         height=40,
         content_padding=ft.padding.only(left=15, right=10, top=5),
-        border_radius=20,
-        bgcolor="#1e1f20",
-        border_width=0,
-        text_style=ft.TextStyle(color="white"),
-        label_style=ft.TextStyle(color="#8e918f"),
-        on_submit=perform_search,
-        suffix=ft.Container(
-            content=ft.Icon(ft.Icons.CLOSE, size=16, color="#8e918f"),
-            on_click=clear_search,
-            padding=5,
-            ink=True,
-            border_radius=20
-        )
+        text_size=14,
+        expand=True,
+        visible=True # Visible by default on desktop
     )
 
-    # --- SETTINGS / ADMIN ---
-    async def clear_database_click(e):
-        if await asyncio.to_thread(database.clear_global_database):
-            page.snack_bar = ft.SnackBar(content=ft.Text("GLOBAL DATABASE CLEARED"))
-            page.snack_bar.open = True
-            page.update()
-
-    def update_deja_vu(e):
+    # --- SETTINGS MENU ---
+    async def update_deja_vu(e):
         settings["deja_vu_enabled"] = deja_vu_switch.value
         database.DEJA_VU_ENABLED = settings["deja_vu_enabled"]
-        print(f"DEBUG: Deja Vu Enabled = {database.DEJA_VU_ENABLED}")
+        print(f"DEBUG: settings - Deja Vu set to: {database.DEJA_VU_ENABLED}")
+
+    async def clear_database_click(e):
+        def on_confirm(ce):
+            confirm_dlg.open = False
+            page.update()
+            if database.clear_global_database():
+                print("DEBUG: Database cleared.")
+
+        confirm_dlg = ft.AlertDialog(
+            title=ft.Text("Clear Database?"),
+            content=ft.Text("This will delete ALL messages for everyone. Are you sure?"),
+            actions=[
+                ft.TextButton("Cancel", on_click=lambda _: setattr(confirm_dlg, "open", False)),
+                ft.TextButton("Yes, Clear Everything", on_click=on_confirm, style=ft.ButtonStyle(color="#B71C1C"))
+            ]
+        )
+        page.overlay.append(confirm_dlg)
+        confirm_dlg.open = True
+        page.update()
 
     typing_switch = ft.Switch(
         label="Typing Indicator",
@@ -699,43 +546,99 @@ async def main(page: ft.Page):
 
     new_message = ft.TextField(
         hint_text=selected_hint,
-        hint_style=ft.TextStyle(color="#8e918f"),
-        text_style=ft.TextStyle(color=ui.TEXT_COLOR, size=16),
         expand=True,
-        on_submit=on_send_click,
-        on_change=on_input_change,
+        border_radius=24,
+        bgcolor="#1e1f20",
+        border_color="transparent",
+        on_submit=lambda e: page.run_task(send_click, e),
+        on_change=lambda e: page.run_task(on_typing, e),
+        content_padding=ft.padding.all(15),
+        text_size=16,
         multiline=True,
         min_lines=1,
         max_lines=5,
-        bgcolor="transparent",
-        border_width=0,
-        content_padding=ft.padding.all(15),
+        shift_enter=True
     )
+
+    async def on_typing(e):
+        if not settings["typing_enabled"]: return
+        now = time.time()
+        if now - state["last_typing_sent"] > 2.0:
+            state["last_typing_sent"] = now
+            # Offload heavy DB write to background 
+            await asyncio.to_thread(database.send_typing_signal, state["user_name"])
+
+    async def send_click(e):
+        if not new_message.value: return
+        text = new_message.value
+        new_message.value = ""
+        new_message.update()
+        
+        # Offload Firestore insertion to thread
+        await asyncio.to_thread(
+            database.insert_message, 
+            state["user_name"], 
+            text, 
+            "chat_message", 
+            is_temp=state["is_temp_mode"]
+        )
+        await scroll_to_bottom()
 
     send_button = ft.IconButton(
         icon=ft.Icons.SEND_ROUNDED,
-        icon_color="#e3e3e3",
-        on_click=on_send_click,
-        tooltip="Send message"
+        icon_color="#8ab4f8",
+        on_click=lambda e: page.run_task(send_click, e)
     )
 
     input_container = ft.Container(
         content=ft.Row([
             timer_button,
-            # ft.IconButton(
-            #     icon=ft.Icons.ADD_CIRCLE_OUTLINE,
-            #     icon_color="#c4c7c5",
-            #     tooltip="Upload Audio (Disabled)",
-            #     on_click=lambda _: file_picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.AUDIO)
-            # ),
             new_message,
             send_button
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-        bgcolor="#1e1f20",
-        border_radius=32,
-        padding=5,
+        ], alignment=ft.MainAxisAlignment.CENTER),
+        padding=0,
         margin=ft.padding.only(left=20, right=20, bottom=20, top=10)
     )
+
+    # --- TYPING INDICATOR LOOP ---
+    typing_text = ft.Text(value="", size=12, italic=True, color="#8e918f", animate_opacity=200)
+
+    async def update_typing_ui():
+        while page_alive:
+            try:
+                now = time.time()
+                active_typers = [u for u, t in database.typing_status.items() if now - t < database.DECAY_TIMEOUT]
+                
+                if not active_typers:
+                    typing_text.value = ""
+                    typing_text.opacity = 0
+                elif len(active_typers) == 1:
+                    typing_text.value = f"{active_typers[0]} is typing..."
+                    typing_text.opacity = 1
+                else:
+                    typing_text.value = "Multiple people are typing..."
+                    typing_text.opacity = 1
+                
+                typing_text.update()
+            except:
+                pass
+            await asyncio.sleep(1.0)
+
+    page.run_task(update_typing_ui)
+
+    # --- HEARTBEAT & SYNC ---
+    async def heartbeat_loop():
+        while page_alive:
+            try:
+                # 1. Update User Count
+                active_users = database.get_active_user_count()
+                user_count_text.value = f"● {active_users} online"
+                user_count_text.update()
+            except:
+                pass
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+    page.run_task(heartbeat_loop)
 
     async def join_chat_click(e):
         try:
