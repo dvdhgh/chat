@@ -1,4 +1,4 @@
-# LDN Chat Version: v3.10.0 (Feature: Déjà Vu Toggle + Code Polish)
+# LDN Chat Version: v3.11.0 (Mobile Performance Optimization)
 import flet as ft
 import os
 import time
@@ -12,8 +12,8 @@ import database  # Backend module
 import ui_components as ui
 # import flet_audio as fta # Temporarily disabled to isolate conflicts
 
-print(f"DEBUG: Startup - Flet Version: {ft.__version__}")
-APP_VERSION = "v3.10.5 (Layout Tweaks)"
+print(f\"DEBUG: Startup - Flet Version: {ft.__version__}\")
+APP_VERSION = \"v3.11.0 (Mobile Performance)\"
 # --- CONFIG ---
 HEARTBEAT_INTERVAL = 4.0
 HISTORY_BATCH_SIZE = 30
@@ -25,21 +25,21 @@ async def main(page: ft.Page):
 
     # --- APP SETTINGS & STATE ---
     settings = {
-        "typing_enabled": True,
-        "deja_vu_enabled": False  # DEFAULT: OFF to save costs
+        \"typing_enabled\": True,
+        \"deja_vu_enabled\": False  # DEFAULT: OFF to save costs
     }
 
     # Sync initial state to backend
-    database.DEJA_VU_ENABLED = settings["deja_vu_enabled"]
+    database.DEJA_VU_ENABLED = settings[\"deja_vu_enabled\"]
 
     state = {
-        "user_name": None,
-        "last_typing_sent": 0.0,
-        "is_temp_mode": False,
-        "joining": False,
-        "full_history": [],
-        "history_cursor": 0,
-        "is_loading_history": False
+        \"user_name\": None,
+        \"last_typing_sent\": 0.0,
+        \"is_temp_mode\": False,
+        \"joining\": False,
+        \"full_history\": [],
+        \"history_cursor\": 0,
+        \"is_loading_history\": False
     }
 
     # Optimization: O(1) lookup for message controls
@@ -48,99 +48,99 @@ async def main(page: ft.Page):
     # --- SETUP PAGE ---
     page.theme_mode = ft.ThemeMode.DARK
     page.bgcolor = ui.PAGE_BG
-    page.title = f"LDN Chat {APP_VERSION}"
+    page.title = f\"LDN Chat {APP_VERSION}\"
     page.padding = 0
 
     # --- AUDIO PLAYER ---
     # --- AUDIO PLAYER (DISABLED FOR DEBUG) ---
     # try:
-    #     print("DEBUG: Initializing global_audio_player...")
+    #     print(\"DEBUG: Initializing global_audio_player...\")
     #     global_audio_player = fta.Audio(
-    #         src="about:blank",
+    #         src=\"about:blank\",
     #         autoplay=False
     #     )
     #     page.overlay.append(global_audio_player)
-    #     print("DEBUG: global_audio_player added to overlay.")
+    #     print(\"DEBUG: global_audio_player added to overlay.\")
     # except Exception as e:
-    #     print(f"CRITICAL: Failed to add Audio to overlay: {e}")
+    #     print(f\"CRITICAL: Failed to add Audio to overlay: {e}\")
 
     file_picker = ft.FilePicker()
 
     # FilePicker and SnackBar initialization (Disabled for stability)
     # try:
-    #     feedback_snack = ft.SnackBar(content=ft.Text(""), duration=1500)
+    #     feedback_snack = ft.SnackBar(content=ft.Text(\"\"), duration=1500)
     #     page.overlay.append(feedback_snack)
     # except Exception as e:
-    #     print(f"CRITICAL: Failed to add SnackBar to overlay: {e}")
+    #     print(f\"CRITICAL: Failed to add SnackBar to overlay: {e}\")
 
     # try:
-    #     print("DEBUG: Registering FilePicker to overlay...")
+    #     print(\"DEBUG: Registering FilePicker to overlay...\")
     #     page.overlay.append(file_picker)
-    #     print("DEBUG: FilePicker added to overlay.")
+    #     print(\"DEBUG: FilePicker added to overlay.\")
     # except Exception as e:
-    #     print(f"CRITICAL: Failed to add FilePicker to overlay: {e}")
+    #     print(f\"CRITICAL: Failed to add FilePicker to overlay: {e}\")
 
     # Check persistence early
     stored_user = None
-    if hasattr(page, "client_storage"):
-        stored_user = page.client_storage.get("user_name")
+    if hasattr(page, \"client_storage\"):
+        stored_user = page.client_storage.get(\"user_name\")
 
     def cache_audio_file(msg_uid, audio_ref):
         try:
-            filename = f"{msg_uid}.mp4"
+            filename = f\"{msg_uid}.mp4\"
             filepath = os.path.join(database.CACHE_DIR, filename)
-            if os.path.exists(filepath): return f"/cache/{filename}"
+            if os.path.exists(filepath): return f\"/cache/{filename}\"
 
             # If audio_ref starts with gs://, download from GCS
-            if isinstance(audio_ref, str) and audio_ref.startswith("gs://"):
+            if isinstance(audio_ref, str) and audio_ref.startswith(\"gs://\"):
                 bucket = database.storage_client.bucket(database.BUCKET_NAME)
-                blob_name = audio_ref.replace(f"gs://{database.BUCKET_NAME}/", "")
+                blob_name = audio_ref.replace(f\"gs://{database.BUCKET_NAME}/\", \"\")
                 blob = bucket.blob(blob_name)
                 blob.download_to_filename(filepath)
             elif audio_ref: # Fallback for old base64 data
                 if isinstance(audio_ref, memoryview):
                     audio_ref = bytes(audio_ref)
                 audio_bytes = base64.b64decode(audio_ref)
-                with open(filepath, "wb") as f:
+                with open(filepath, \"wb\") as f:
                     f.write(audio_bytes)
             else:
                 return None
                 
-            return f"/cache/{filename}"
+            return f\"/cache/{filename}\"
         except Exception as e:
-            print(f"Cache Error: {e}")
+            print(f\"Cache Error: {e}\")
             return None
 
     async def play_audio_message(msg_uid, audio_ref):
-        print(f"DEBUG: Audio playback requested for {msg_uid} but is temporarily disabled.")
+        print(f\"DEBUG: Audio playback requested for {msg_uid} but is temporarily disabled.\")
         # try:
         #     if not audio_ref: return
-        #     feedback_snack.content.value = "Buffering from Cloud..."
+        #     feedback_snack.content.value = \"Buffering from Cloud...\"
         #     feedback_snack.open = True
         #     feedback_snack.update()
         #
         #     relative_url = await asyncio.to_thread(cache_audio_file, msg_uid, audio_ref)
         #     if not relative_url: return
         #
-        #     global_audio_player.src = f"{relative_url}?t={int(time.time())}"
+        #     global_audio_player.src = f\"{relative_url}?t={int(time.time())}\"
         #     global_audio_player.autoplay = True
         #     global_audio_player.update()
         #     await asyncio.sleep(0.1)
         #     global_audio_player.play()
         # except Exception as ex:
-        #     print(f"Playback error: {ex}")
+        #     print(f\"Playback error: {ex}\")
 
     # --- INIT BACKEND ---
-    print("DEBUG: Calling database.init_db()...")
+    print(\"DEBUG: Calling database.init_db()...\")
     database.init_db() # Idempotent call
     
-    print("DEBUG: Registering session with database...")
+    print(\"DEBUG: Registering session with database...\")
     database.register_session(page.pubsub)
     
     # Consolidation of on_disconnect
     async def handle_disconnect(e):
         nonlocal page_alive
-        print("DEBUG: Session disconnected, unregistering...")
+        print(\"DEBUG: Session disconnected, unregistering...\")
         page_alive = False
         database.unregister_session(page.pubsub)
     
@@ -150,8 +150,8 @@ async def main(page: ft.Page):
 
     # 1. COPY FEEDBACK BANNER (Toast)
     copy_banner = ft.Container(
-        content=ft.Text("Copied to clipboard", color="black", size=14, weight="w500"),
-        bgcolor="white",
+        content=ft.Text(\"Copied to clipboard\", color=\"black\", size=14, weight=\"w500\"),
+        bgcolor=\"white\",
         padding=ft.padding.only(top=12, bottom=12, left=16, right=16),
         border_radius=8,
         visible=False,
@@ -160,7 +160,7 @@ async def main(page: ft.Page):
         shadow=ft.BoxShadow(
             spread_radius=1,
             blur_radius=5,
-            color="#4d000000",
+            color=\"#4d000000\",
             offset=ft.Offset(0, 2),
         ),
         animate_opacity=300,
@@ -177,10 +177,10 @@ async def main(page: ft.Page):
         copy_banner.update()
 
     # 2. HEADER ELEMENTS
-    session_avatar = ft.CircleAvatar(radius=16, visible=False, bgcolor="#444746")
-    session_name = ft.Text(value="", weight="bold", visible=False, color=ui.TEXT_COLOR)
+    session_avatar = ft.CircleAvatar(radius=16, visible=False, bgcolor=\"#444746\")
+    session_name = ft.Text(value=\"\", weight=\"bold\", visible=False, color=ui.TEXT_COLOR)
     user_session_info = ft.Row(controls=[session_avatar, session_name])
-    user_count_text = ft.Text(value="...", size=12, color="#8e918f", weight="bold")
+    user_count_text = ft.Text(value=\"...\", size=12, color=\"#8e918f\", weight=\"bold\")
 
     # 3. CHAT AREA
     chat = ft.ListView(
@@ -205,35 +205,35 @@ async def main(page: ft.Page):
 
     scroll_down_button = ft.IconButton(
         icon=ft.Icons.ARROW_DOWNWARD,
-        icon_color="#c4c7c5",
-        bgcolor="#1e1f20",
+        icon_color=\"#c4c7c5\",
+        bgcolor=\"#1e1f20\",
         visible=False,
         on_click=scroll_to_bottom_click,
-        tooltip="Jump to latest"
+        tooltip=\"Jump to latest\"
     )
 
     chat.on_scroll_interval = 10
 
     # --- PAGINATION LOGIC ---
     async def load_history_chunk():
-        if state["is_loading_history"]: return
+        if state[\"is_loading_history\"]: return
 
-        total_available = len(state["full_history"])
-        if state["history_cursor"] >= total_available:
+        total_available = len(state[\"full_history\"])
+        if state[\"history_cursor\"] >= total_available:
             return
 
-        state["is_loading_history"] = True
-        start_idx = state["history_cursor"]
+        state[\"is_loading_history\"] = True
+        start_idx = state[\"history_cursor\"]
         end_idx = start_idx + HISTORY_BATCH_SIZE
-        chunk = state["full_history"][start_idx:end_idx]
+        chunk = state[\"full_history\"][start_idx:end_idx]
 
-        print(f"DEBUG: load_history_chunk - cursor: {start_idx}, batch: {HISTORY_BATCH_SIZE}")
+        print(f\"DEBUG: load_history_chunk - cursor: {start_idx}, batch: {HISTORY_BATCH_SIZE}\")
         new_controls = []
         for msg in chunk:
             try:
                 m = ui.create_chat_message(
                     msg, 
-                    state["user_name"], 
+                    state[\"user_name\"], 
                     trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
                     on_tap_link=page.launch_url,
                     play_audio_callback=play_audio_message
@@ -242,12 +242,12 @@ async def main(page: ft.Page):
                     message_controls[str(msg.uid)] = m
                     new_controls.append(m)
             except Exception as e:
-                print(f"DEBUG: Error creating message {msg.uid}: {e}")
+                print(f\"DEBUG: Error creating message {msg.uid}: {e}\")
 
-        print(f"DEBUG: load_history_chunk - adding {len(new_controls)} controls to chat.")
+        print(f\"DEBUG: load_history_chunk - adding {len(new_controls)} controls to chat.\")
         chat.controls.extend(new_controls)
-        state["history_cursor"] = end_idx
-        state["is_loading_history"] = False
+        state[\"history_cursor\"] = end_idx
+        state[\"is_loading_history\"] = False
         chat.update() # Explicitly update chat
         page.update()
 
@@ -283,7 +283,7 @@ async def main(page: ft.Page):
         
         m = ui.create_chat_message(
             msg, 
-            state["user_name"], 
+            state[\"user_name\"], 
             trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
             on_tap_link=page.launch_url,
             play_audio_callback=play_audio_message
@@ -293,23 +293,32 @@ async def main(page: ft.Page):
             # Efficiently find the index and replace
             existing_control = message_controls[uid_str]
             try:
-                idx = chat.controls.index(existing_control)
-                chat.controls[idx] = m
-            except ValueError:
-                # Fallback if list and map are out of sync somehow
-                chat.controls.insert(0, m)
+                # OPTIMIZATION: Update properties instead of replacing index
+                # This is much faster on mobile
+                existing_control.content = m.content
+                existing_control.update()
+            except Exception:
+                # Fallback if update fails
+                try:
+                    idx = chat.controls.index(existing_control)
+                    chat.controls[idx] = m
+                    chat.update()
+                except ValueError:
+                    chat.controls.insert(0, m)
+                    chat.update()
         else:
             chat.controls.insert(0, m)
             if msg.user_name in database.typing_status:
                 del database.typing_status[msg.user_name]
+            if update_page:
+                chat.update()
         
         message_controls[uid_str] = m
 
         if update_page:
             try:
-                chat.update()
                 # Scroll to bottom if user is at the bottom or it's their own message
-                if not scroll_down_button.visible or msg.user_name == state["user_name"]:
+                if not scroll_down_button.visible or msg.user_name == state[\"user_name\"]:
                     await scroll_to_bottom(instant=False)
 
                 await update_typing_ui()
@@ -320,33 +329,33 @@ async def main(page: ft.Page):
     # --- PUBSUB LISTENER ---
     async def on_pubsub_message(data):
         if isinstance(data, dict):
-            if data.get("message_type") == "clear_signal":
+            if data.get(\"message_type\") == \"clear_signal\":
                 chat.controls.clear()
                 message_controls.clear()
-                state["last_msg_id"] = 0
+                state[\"last_msg_id\"] = 0
                 page.update()
                 return
-            if data.get("message_type") == "delete_message":
-                uid_to_delete = str(data.get("uid"))
+            if data.get(\"message_type\") == \"delete_message\":
+                uid_to_delete = str(data.get(\"uid\"))
                 if uid_to_delete in message_controls:
                     control = message_controls.pop(uid_to_delete)
                     try:
                         chat.controls.remove(control)
-                        page.update()
+                        chat.update()
                     except ValueError:
                         pass
                 return
-            if data.get("message_type") == "typing_signal":
-                u_name = data.get("user_name")
-                if settings["typing_enabled"] and u_name != state["user_name"]:
+            if data.get(\"message_type\") == \"typing_signal\":
+                u_name = data.get(\"user_name\")
+                if settings[\"typing_enabled\"] and u_name != state[\"user_name\"]:
                     database.typing_status[u_name] = time.time()
                     await update_typing_ui()
                 return
-            if data.get("message_type") == "user_count":
-                user_count_text.value = f"{data.get('count', 0)} online"
+            if data.get(\"message_type\") == \"user_count\":
+                user_count_text.value = f\"{data.get('count', 0)} online\"
                 user_count_text.update()
                 return
-            if data.get("message_type") == "audio_message" and not data.get("audio_data"):
+            if data.get(\"message_type\") == \"audio_message\" and not data.get(\"audio_data\"):
                 await handle_incoming_message(data)
                 return
             await handle_incoming_message(data)
@@ -354,10 +363,10 @@ async def main(page: ft.Page):
     page.pubsub.subscribe(on_pubsub_message)
 
     # --- TYPING INDICATOR LOGIC ---
-    typing_text = ft.Text(value="", italic=True, color="#8e918f", size=12, visible=False)
+    typing_text = ft.Text(value=\"\", italic=True, color=\"#8e918f\", size=12, visible=False)
 
     async def update_typing_ui():
-        if not settings["typing_enabled"]:
+        if not settings[\"typing_enabled\"]:
             if typing_text.visible:
                 typing_text.visible = False
                 typing_text.update()
@@ -365,9 +374,9 @@ async def main(page: ft.Page):
         now = time.time()
         active = [u for u, ts in database.typing_status.items()
                   if now - ts < database.DECAY_TIMEOUT
-                  and u != state["user_name"]]
+                  and u != state[\"user_name\"]]
         if active:
-            typing_text.value = f"{active[0]} is typing..." if len(active) == 1 else "Multiple people typing..."
+            typing_text.value = f\"{active[0]} is typing...\" if len(active) == 1 else \"Multiple people typing...\"
             typing_text.visible = True
         else:
             typing_text.visible = False
@@ -385,59 +394,59 @@ async def main(page: ft.Page):
         txt = new_message.value
         if not txt: return
 
-        if txt.strip() == "/help":
-            help_text = "**Commands:**\n`/lens <style>`\n`/capsule <60s> <msg>`\n`/help`"
+        if txt.strip() == \"/help\":
+            help_text = \"**Commands:**\\n`/lens <style>`\\n`/capsule <60s> <msg>`\\n`/help`\"
             help_msg = database.Message(
-                user_name="SYSTEM",
+                user_name=\"SYSTEM\",
                 text=help_text,
-                message_type="analysis_message",
-                timestamp=datetime.datetime.now().strftime("%H:%M"),
+                message_type=\"analysis_message\",
+                timestamp=datetime.datetime.now().strftime(\"%H:%M\"),
                 uid=str(uuid.uuid4())
             )
             chat.controls.insert(0, ui.create_chat_message(
                 help_msg, 
-                state["user_name"], 
+                state[\"user_name\"], 
                 trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
                 on_tap_link=page.launch_url,
                 play_audio_callback=play_audio_message
             ))
-            new_message.value = ""
+            new_message.value = \"\"
             chat.update()
             new_message.update()
             await scroll_to_bottom(instant=False)
             return
 
-        new_message.value = ""
+        new_message.value = \"\"
         page.update()
         try:
-            print(f"DEBUG: App sending message. text={txt[:20]}..., is_temp={state['is_temp_mode']}")
+            print(f\"DEBUG: App sending message. text={txt[:20]}..., is_temp={state['is_temp_mode']}\")
             # Use to_thread to prevent blocking the UI loop
-            await asyncio.to_thread(database.insert_message, state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
+            await asyncio.to_thread(database.insert_message, state[\"user_name\"], txt, \"chat_message\", is_temp=state[\"is_temp_mode\"])
 
         except Exception as ex:
-            print(f"Send Error: {ex}")
+            print(f\"Send Error: {ex}\")
 
     async def on_input_change(e):
         now = time.time()
-        if state["user_name"] and (now - state["last_typing_sent"] > HEARTBEAT_INTERVAL):
-            state["last_typing_sent"] = now
-            database.send_typing_signal(state["user_name"])
+        if state[\"user_name\"] and (now - state[\"last_typing_sent\"] > HEARTBEAT_INTERVAL):
+            state[\"last_typing_sent\"] = now
+            database.send_typing_signal(state[\"user_name\"])
 
     # --- FILE UPLOAD (AUDIO) ---
     async def on_file_picked(e):
         if e.files:
             file_obj = e.files[0]
             new_uid = str(uuid.uuid4())
-            ts = datetime.datetime.now().strftime("%H:%M")
-            safe_user = "".join(x for x in state["user_name"] if x.isalnum())
-            filename = f"{safe_user}_{new_uid}.m4a"
+            ts = datetime.datetime.now().strftime(\"%H:%M\")
+            safe_user = \"\".join(x for x in state[\"user_name\"] if x.isalnum())
+            filename = f\"{safe_user}_{new_uid}.m4a\"
             placeholder_data = {
-                "user_name": state["user_name"],
-                "text": "Uploading...",
-                "message_type": "audio_message",
-                "timestamp": ts,
-                "uid": new_uid,
-                "audio_data": None
+                \"user_name\": state[\"user_name\"],
+                \"text\": \"Uploading...\",
+                \"message_type\": \"audio_message\",
+                \"timestamp\": ts,
+                \"uid\": new_uid,
+                \"audio_data\": None
             }
             await handle_incoming_message(placeholder_data)
             upload_url = page.get_upload_url(filename, 600)
@@ -454,20 +463,20 @@ async def main(page: ft.Page):
                             bucket = database.storage_client.bucket(database.BUCKET_NAME)
                             blob = bucket.blob(fname)
                             await asyncio.to_thread(blob.upload_from_filename, full_path)
-                            gcs_uri = f"gs://{database.BUCKET_NAME}/{fname}"
+                            gcs_uri = f\"gs://{database.BUCKET_NAME}/{fname}\"
                             
                             await asyncio.to_thread(
                                 database.insert_message,
-                                state["user_name"],
-                                "Audio Message",
-                                "audio_message",
-                                is_temp=state["is_temp_mode"],
+                                state[\"user_name\"],
+                                \"Audio Message\",
+                                \"audio_message\",
+                                is_temp=state[\"is_temp_mode\"],
                                 audio_payload=gcs_uri
                             )
                             await asyncio.to_thread(os.remove, full_path)
                             return
                         except Exception as ex:
-                            print(f"GCS Upload error: {ex}")
+                            print(f\"GCS Upload error: {ex}\")
                             return
                     await asyncio.sleep(1)
                     attempts += 1
@@ -487,7 +496,7 @@ async def main(page: ft.Page):
         # Pre-compile search pattern once
         try:
             q_regex = re.escape(query)
-            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
+            query_pattern = re.compile(f\"({q_regex})\", re.IGNORECASE)
         except Exception:
             query_pattern = None
 
@@ -509,8 +518,8 @@ async def main(page: ft.Page):
                             spans=ui.generate_spans(original_text, page.launch_url, query_pattern=query_pattern, query_text=query),
                             selectable=True,
                             size=15,
-                            color="#e3e3e3",
-                            font_family="Roboto, sans-serif"
+                            color=\"#e3e3e3\",
+                            font_family=\"Roboto, sans-serif\"
                         )
                     elif isinstance(bubble_container.content, ft.Text):
                         bubble_container.content = ui.create_message_content(
@@ -520,31 +529,35 @@ async def main(page: ft.Page):
                         )
 
         chat.update()
-        search_box.label = f"{matches} matches"
+        search_box.label = f\"{matches} matches\"
         search_box.update()
-        if first_key: await chat.scroll_to(key=first_key, duration=500)
+        if first_key:
+            try:
+                await chat.scroll_to(key=first_key, duration=500)
+            except Exception:
+                pass
 
     async def clear_search(e):
-        search_box.value = ""
-        search_box.label = "Search"
-        state["history_cursor"] = 0
+        search_box.value = \"\"
+        search_box.label = \"Search\"
+        state[\"history_cursor\"] = 0
         chat.controls.clear()
         await load_history_chunk()
         page.update()
 
     search_box = ft.TextField(
-        label="Search",
+        label=\"Search\",
         width=250,
         height=40,
         content_padding=ft.padding.only(left=15, right=10, top=5),
         border_radius=20,
-        bgcolor="#1e1f20",
+        bgcolor=\"#1e1f20\",
         border_width=0,
-        text_style=ft.TextStyle(color="white"),
-        label_style=ft.TextStyle(color="#8e918f"),
+        text_style=ft.TextStyle(color=\"white\"),
+        label_style=ft.TextStyle(color=\"#8e918f\"),
         on_submit=perform_search,
         suffix=ft.Container(
-            content=ft.Icon(ft.Icons.CLOSE, size=16, color="#8e918f"),
+            content=ft.Icon(ft.Icons.CLOSE, size=16, color=\"#8e918f\"),
             on_click=clear_search,
             padding=5,
             ink=True,
@@ -555,49 +568,49 @@ async def main(page: ft.Page):
     # --- SETTINGS / ADMIN ---
     async def clear_database_click(e):
         if await asyncio.to_thread(database.clear_global_database):
-            page.snack_bar = ft.SnackBar(content=ft.Text("GLOBAL DATABASE CLEARED"))
+            page.snack_bar = ft.SnackBar(content=ft.Text(\"GLOBAL DATABASE CLEARED\"))
             page.snack_bar.open = True
             page.update()
 
     def update_deja_vu(e):
-        settings["deja_vu_enabled"] = deja_vu_switch.value
-        database.DEJA_VU_ENABLED = settings["deja_vu_enabled"]
-        print(f"DEBUG: Deja Vu Enabled = {database.DEJA_VU_ENABLED}")
+        settings[\"deja_vu_enabled\"] = deja_vu_switch.value
+        database.DEJA_VU_ENABLED = settings[\"deja_vu_enabled\"]
+        print(f\"DEBUG: Deja Vu Enabled = {database.DEJA_VU_ENABLED}\")
 
     typing_switch = ft.Switch(
-        label="Typing Indicator",
+        label=\"Typing Indicator\",
         value=True,
-        on_change=lambda e: setattr(settings, "typing_enabled", typing_switch.value)
+        on_change=lambda e: setattr(settings, \"typing_enabled\", typing_switch.value)
     )
 
     deja_vu_switch = ft.Switch(
-        label="Enable Déjà Vu (AI)",
+        label=\"Enable D\u00e9j\u00e0 Vu (AI)\",
         value=False,
         on_change=update_deja_vu
     )
 
     clear_button = ft.FilledButton(
-        "Clear Global Database",
-        style=ft.ButtonStyle(bgcolor="#B71C1C", color="white"),
+        \"Clear Global Database\",
+        style=ft.ButtonStyle(bgcolor=\"#B71C1C\", color=\"white\"),
         on_click=clear_database_click
     )
 
-    uptime_text = ft.Text(size=12, color="#8e918f")
+    uptime_text = ft.Text(size=12, color=\"#8e918f\")
 
     settings_sheet = ft.BottomSheet(
         ft.Container(
             ft.Column([
-                ft.Text("Settings", weight="bold", size=18, color="white"),
-                ft.Divider(color="#444746"),
+                ft.Text(\"Settings\", weight=\"bold\", size=18, color=\"white\"),
+                ft.Divider(color=\"#444746\"),
                 typing_switch,
                 deja_vu_switch,
                 ft.Container(height=5),
                 clear_button,
-                ft.Divider(color="#444746"),
-                ft.Row([ft.Text("Server Uptime:", size=12, color="#8e918f"), uptime_text])
+                ft.Divider(color=\"#444746\"),
+                ft.Row([ft.Text(\"Server Uptime:\", size=12, color=\"#8e918f\"), uptime_text])
             ], tight=True, spacing=15),
             padding=30,
-            bgcolor="#1e1f20",
+            bgcolor=\"#1e1f20\",
             border_radius=ft.border_radius.vertical(top=28)
         )
     )
@@ -610,17 +623,17 @@ async def main(page: ft.Page):
 
     settings_button = ft.IconButton(
         icon=ft.Icons.SETTINGS,
-        icon_color="#c4c7c5",
+        icon_color=\"#c4c7c5\",
         on_click=open_settings,
-        tooltip="Settings",
+        tooltip=\"Settings\",
         scale=0.9
     )
 
 
     async def logout_click(e):
-        if hasattr(page, "client_storage"):
-            page.client_storage.remove("user_name")
-        state["user_name"] = None
+        if hasattr(page, \"client_storage\"):
+            page.client_storage.remove(\"user_name\")
+        state[\"user_name\"] = None
         session_avatar.visible = False
         session_name.visible = False
         logout_button.visible = False
@@ -632,40 +645,40 @@ async def main(page: ft.Page):
 
     logout_button = ft.IconButton(
         icon=ft.Icons.LOGOUT,
-        icon_color="#c4c7c5",
+        icon_color=\"#c4c7c5\",
         on_click=logout_click,
-        tooltip="Logout",
+        tooltip=\"Logout\",
         visible=False,
         scale=0.9
     )
 
 
     # --- HINTS & INPUT ---
-    hint_choices = ["Ask anything...", "Type a message...", "Enter a prompt here..."]
+    hint_choices = [\"Ask anything...\", \"Type a message...\", \"Enter a prompt here...\"]
     selected_hint = random.choice(hint_choices)
 
     async def toggle_timer(e):
-        state["is_temp_mode"] = not state["is_temp_mode"]
-        print(f"DEBUG: Toggle Timer: is_temp_mode={state['is_temp_mode']}")
-        if state["is_temp_mode"]:
-            timer_button.icon_color = "#f28b82"  # Pastel Red
-            new_message.hint_text = "Temporary message (60s)..."
+        state[\"is_temp_mode\"] = not state[\"is_temp_mode\"]
+        print(f\"DEBUG: Toggle Timer: is_temp_mode={state['is_temp_mode']}\")
+        if state[\"is_temp_mode\"]:
+            timer_button.icon_color = \"#f28b82\"  # Pastel Red
+            new_message.hint_text = \"Temporary message (60s)...\"
         else:
-            timer_button.icon_color = "#c4c7c5"
+            timer_button.icon_color = \"#c4c7c5\"
             new_message.hint_text = selected_hint
         timer_button.update()
         new_message.update()
 
     timer_button = ft.IconButton(
         icon=ft.Icons.TIMER,
-        icon_color="#c4c7c5",
+        icon_color=\"#c4c7c5\",
         on_click=toggle_timer,
-        tooltip="Toggle Temporary Message"
+        tooltip=\"Toggle Temporary Message\"
     )
 
     new_message = ft.TextField(
         hint_text=selected_hint,
-        hint_style=ft.TextStyle(color="#8e918f"),
+        hint_style=ft.TextStyle(color=\"#8e918f\"),
         text_style=ft.TextStyle(color=ui.TEXT_COLOR, size=16),
         expand=True,
         on_submit=on_send_click,
@@ -673,16 +686,16 @@ async def main(page: ft.Page):
         multiline=True,
         min_lines=1,
         max_lines=5,
-        bgcolor="transparent",
+        bgcolor=\"transparent\",
         border_width=0,
         content_padding=ft.padding.all(15),
     )
 
     send_button = ft.IconButton(
         icon=ft.Icons.SEND_ROUNDED,
-        icon_color="#e3e3e3",
+        icon_color=\"#e3e3e3\",
         on_click=on_send_click,
-        tooltip="Send message"
+        tooltip=\"Send message\"
     )
 
     input_container = ft.Container(
@@ -690,14 +703,14 @@ async def main(page: ft.Page):
             timer_button,
             # ft.IconButton(
             #     icon=ft.Icons.ADD_CIRCLE_OUTLINE,
-            #     icon_color="#c4c7c5",
-            #     tooltip="Upload Audio (Disabled)",
+            #     icon_color=\"#c4c7c5\",
+            #     tooltip=\"Upload Audio (Disabled)\",
             #     on_click=lambda _: file_picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.AUDIO)
             # ),
             new_message,
             send_button
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-        bgcolor="#1e1f20",
+        bgcolor=\"#1e1f20\",
         border_radius=32,
         padding=5,
         margin=ft.padding.only(left=20, right=20, bottom=20, top=10)
@@ -705,25 +718,25 @@ async def main(page: ft.Page):
 
     async def join_chat_click(e):
         if not join_user_name.value:
-            join_user_name.error_text = "Name cannot be blank!"
+            join_user_name.error_text = \"Name cannot be blank!\"
             join_user_name.update()
             return
 
-        state["user_name"] = join_user_name.value
-        if hasattr(page, "client_storage"):
-            page.client_storage.set("user_name", state["user_name"])
+        state[\"user_name\"] = join_user_name.value
+        if hasattr(page, \"client_storage\"):
+            page.client_storage.set(\"user_name\", state[\"user_name\"])
 
         welcome_dlg.open = False
         session_avatar.visible = True
         session_name.visible = True
-        session_name.value = state["user_name"]
-        session_avatar.content = ft.Text(state["user_name"][:1].upper(), color="#131314", weight="bold")
+        session_name.value = state[\"user_name\"]
+        session_avatar.content = ft.Text(state[\"user_name\"][:1].upper(), color=\"#131314\", weight=\"bold\")
         logout_button.visible = True
         page.update()
 
-        # FETCH FULL HISTORY
-        state["full_history"] = database.get_recent_messages()
-        state["history_cursor"] = 0
+        # FETCH FULL HISTORY (Optimized: Offload to background thread)
+        state[\"full_history\"] = await asyncio.to_thread(database.get_recent_messages)
+        state[\"history_cursor\"] = 0
         chat.controls.clear()
         message_controls.clear()
         
@@ -734,17 +747,17 @@ async def main(page: ft.Page):
         await scroll_to_bottom(instant=True)
         
         try:
-            database.insert_message(state["user_name"], f"{state['user_name']} joined", "login_message")
+            database.insert_message(state[\"user_name\"], f\"{state['user_name']} joined\", \"login_message\")
         except Exception as e:
             pass
 
     # --- LOGIN DIALOG ---
     join_user_name = ft.TextField(
-        label="What's your name?",
-        label_style=ft.TextStyle(color="#8e918f"),
-        text_style=ft.TextStyle(color="white"),
-        bgcolor="#1e1f20",
-        border_color="#444746",
+        label=\"What's your name?\",
+        label_style=ft.TextStyle(color=\"#8e918f\"),
+        text_style=ft.TextStyle(color=\"white\"),
+        bgcolor=\"#1e1f20\",
+        border_color=\"#444746\",
         on_submit=join_chat_click,
         autofocus=True
     )
@@ -752,10 +765,10 @@ async def main(page: ft.Page):
 
     welcome_dlg = ft.AlertDialog(
         modal=True,
-        title=ft.Text("Welcome to LDN Chat", color="white", weight="bold"),
+        title=ft.Text(\"Welcome to LDN Chat\", color=\"white\", weight=\"bold\"),
         content=ft.Container(content=join_user_name, width=400, padding=10),
-        actions=[ft.TextButton("JOIN CHAT", on_click=join_chat_click)],
-        bgcolor="#1e1f20",
+        actions=[ft.TextButton(\"JOIN CHAT\", on_click=join_chat_click)],
+        bgcolor=\"#1e1f20\",
     )
     page.overlay.append(welcome_dlg)
 
@@ -789,7 +802,7 @@ async def main(page: ft.Page):
 
     mobile_search_btn = ft.IconButton(
         icon=ft.Icons.SEARCH,
-        icon_color="#c4c7c5",
+        icon_color=\"#c4c7c5\",
         visible=False,
         on_click=toggle_mobile_search,
         scale=0.9
@@ -833,7 +846,7 @@ async def main(page: ft.Page):
         welcome_dlg.open = True
         page.update()
 
-if __name__ == "__main__":
+if __name__ == \"__main__\":
     # Use 0.0.0.0 for Cloud Run, but 127.0.0.1 for local dev auto-open
-    host_addr = "0.0.0.0" if os.getenv("K_SERVICE") else "127.0.0.1"
-    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=9090, host=host_addr, assets_dir="assets", upload_dir="uploads")
+    host_addr = \"0.0.0.0\" if os.getenv(\"K_SERVICE\") else \"127.0.0.1\"
+    ft.app(target=main, view=ft.AppView.WEB_BROWSER, port=9090, host=host_addr, assets_dir=\"assets\", upload_dir=\"uploads\")
