@@ -47,7 +47,7 @@ if FIRESTORE_EMULATOR_HOST:
 else:
     db = firestore.Client(project=PROJECT_ID)
 
-50: sm = secretmanager.SecretManagerServiceClient()
+sm = secretmanager.SecretManagerServiceClient()
 
 if STORAGE_EMULATOR_HOST:
     if is_emulator_ready(STORAGE_EMULATOR_HOST):
@@ -89,7 +89,7 @@ CACHE_DIR = "assets/cache"
 UPLOAD_DIR = "uploads" # Still used for temporary buffering before GCS upload
 
 # --- STATE ---
-92: analysis_buffer = []
+analysis_buffer = []
 # The "Memory" of the last observation
 last_observation = "The channel is silent."
 # The "Lens" (Default personality)
