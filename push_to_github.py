@@ -64,6 +64,18 @@ def gather_files(root_dir):
                         "content": content
                     })
                     print(f"Adding (text): {rel_path}")
+                except UnicodeDecodeError:
+                    try:
+                        # Fallback to UTF-16, a common encoding in PowerShell standard out
+                        with open(filepath, 'r', encoding='utf-16') as f:
+                            content = f.read()
+                        files_to_push.append({
+                            "path": rel_path,
+                            "content": content
+                        })
+                        print(f"Adding (utf-16 text): {rel_path}")
+                    except Exception as fallback_e:
+                        print(f"Warning: Could not read {rel_path} with utf-8 or utf-16: {fallback_e}")
                 except Exception as e:
                     print(f"Warning: Could not read {rel_path}: {e}")
             else:
