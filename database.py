@@ -87,11 +87,13 @@ def broadcast(message_data):
     if not local_sessions:
         return
     def _do_broadcast():
-        for session in list(local_sessions):
+        # Copy the sessions to avoid "set changed size during iteration" errors
+        sessions = list(local_sessions)
+        for session in sessions:
             try:
                 session.send_all(message_data)
-                return
-            except:
+            except Exception as e:
+                # If a session fails, unregister it locally to prevent future failures
                 if session in local_sessions:
                     local_sessions.remove(session)
     threading.Thread(target=_do_broadcast, daemon=True).start()

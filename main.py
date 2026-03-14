@@ -141,7 +141,7 @@ async def main(page: ft.Page):
     # Consolidation of on_disconnect
     async def handle_disconnect(e):
         nonlocal page_alive
-        print("DEBUG: Session disconnected, unregistering...")
+        print(f"DEBUG: Session for {state['user_name']} disconnected, unregistering...")
         page_alive = False
         database.unregister_session(page.pubsub)
     
@@ -326,7 +326,8 @@ async def main(page: ft.Page):
                     await scroll_to_bottom(instant=False)
 
                 await update_typing_ui()
-            except Exception:
+            except Exception as ex:
+                print(f"DEBUG: UI Update suppressed: {ex}")
                 pass
 
 
