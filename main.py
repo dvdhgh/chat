@@ -40,7 +40,10 @@ async def main(page: ft.Page):
         "full_history": [],
         "history_cursor": 0,
         "is_loading_history": False,
-        "last_search_query": ""
+        "last_search_query": "",
+        "search_matches": [],
+        "active_search_index": -1,
+        "search_focused": False
     }
 
     # Optimization: O(1) lookup for message controls
@@ -66,20 +69,6 @@ async def main(page: ft.Page):
     #     print(f"CRITICAL: Failed to add Audio to overlay: {e}")
 
     file_picker = ft.FilePicker()
-
-    # FilePicker and SnackBar initialization (Disabled for stability)
-    # try:
-    #     feedback_snack = ft.SnackBar(content=ft.Text(""), duration=1500)
-    #     page.overlay.append(feedback_snack)
-    # except Exception as e:
-    #     print(f"CRITICAL: Failed to add SnackBar to overlay: {e}")
-
-    # try:
-    #     print("DEBUG: Registering FilePicker to overlay...")
-    #     page.overlay.append(file_picker)
-    #     print("DEBUG: FilePicker added to overlay.")
-    # except Exception as e:
-    #     print(f"CRITICAL: Failed to add FilePicker to overlay: {e}")
 
     # Check persistence early
     stored_user = None
@@ -114,22 +103,6 @@ async def main(page: ft.Page):
 
     async def play_audio_message(msg_uid, audio_ref):
         print(f"DEBUG: Audio playback requested for {msg_uid} but is temporarily disabled.")
-        # try:
-        #     if not audio_ref: return
-        #     feedback_snack.content.value = "Buffering from Cloud..."
-        #     feedback_snack.open = True
-        #     feedback_snack.update()
-        #
-        #     relative_url = await asyncio.to_thread(cache_audio_file, msg_uid, audio_ref)
-        #     if not relative_url: return
-        #
-        #     global_audio_player.src = f"{relative_url}?t={int(time.time())}"
-        #     global_audio_player.autoplay = True
-        #     global_audio_player.update()
-        #     await asyncio.sleep(0.1)
-        #     global_audio_player.play()
-        # except Exception as ex:
-        #     print(f"Playback error: {ex}")
 
     # --- INIT BACKEND ---
     print("DEBUG: Calling database.init_db()...")
@@ -248,16 +221,14 @@ async def main(page: ft.Page):
         print(f"DEBUG: load_history_chunk - adding {len(new_controls)} controls to chat.")
         chat.controls.extend(new_controls)
         
-        # DOM CAPPING: Limit to 200 messages to maintain mobile performance
         if len(chat.controls) > 200:
             chat.controls = chat.controls[:200]
-            # Refresh message_controls mapping for consistency if needed
-            # (In reverse mode, index 0 is bottom, so we remove from the end/top)
 
         state["history_cursor"] = end_idx
         state["is_loading_history"] = False
-        chat.update() # Explicitly update chat
-        page.update()
+        if page_alive:
+            chat.update()
+            page.update()
 
     async def on_chat_scroll(e):
         try:
@@ -282,11 +253,16 @@ async def main(page: ft.Page):
         except Exception:
             pass
 
-    # Removed UI rendering logic (moved to ui_components.py)
-
     # --- INCOMING MESSAGE HANDLER ---
     async def handle_incoming_message(data, update_page=True):
         msg = database.Message(**data)
+        
+        # Sync with local full_history so reloads (like after search) don't lose messages
+        if not any(m.uid == msg.uid for m in state["full_history"]):
+            state["full_history"].insert(0, msg)
+            if len(state["full_history"]) > 500: # Optional cap
+                state["full_history"] = state["full_history"][:500]
+
         uid_str = str(msg.uid)
         
         m = ui.create_chat_message(
@@ -309,25 +285,22 @@ async def main(page: ft.Page):
             if msg.user_name in database.typing_status:
                 del database.typing_status[msg.user_name]
 
-        # DOM CAPPING: Ensure the list doesn't grow indefinitely on mobile
         if len(chat.controls) > 200:
-            removed = chat.controls.pop() # Remove oldest from the end
-            # Cleanup message_controls to prevent memory leak
+            removed = chat.controls.pop()
             if hasattr(removed, 'key') and removed.key in message_controls:
                 del message_controls[removed.key]
         
         message_controls[uid_str] = m
 
-        if update_page:
+        if update_page and page_alive:
             try:
                 chat.update()
-                # Scroll to bottom if user is at the bottom or it's their own message
                 if not scroll_down_button.visible or msg.user_name == state["user_name"]:
-                    await scroll_to_bottom(instant=False)
+                    page.run_task(scroll_to_bottom, instant=False)
 
-                await update_typing_ui()
+                page.run_task(update_typing_ui)
             except Exception as ex:
-                print(f"DEBUG: UI Update suppressed: {ex}")
+                print(f"DEBUG: UI Update suppressed (likely closed): {ex}")
                 pass
 
 
@@ -335,12 +308,14 @@ async def main(page: ft.Page):
     async def on_pubsub_message(data):
         if isinstance(data, dict):
             if data.get("message_type") == "clear_signal":
+                if not page_alive: return
                 chat.controls.clear()
                 message_controls.clear()
                 state["last_msg_id"] = 0
                 page.update()
                 return
             if data.get("message_type") == "delete_message":
+                if not page_alive: return
                 uid_to_delete = str(data.get("uid"))
                 if uid_to_delete in message_controls:
                     control = message_controls.pop(uid_to_delete)
@@ -351,12 +326,14 @@ async def main(page: ft.Page):
                         pass
                 return
             if data.get("message_type") == "typing_signal":
+                if not page_alive: return
                 u_name = data.get("user_name")
                 if settings["typing_enabled"] and u_name != state["user_name"]:
                     database.typing_status[u_name] = time.time()
-                    await update_typing_ui()
+                    page.run_task(update_typing_ui)
                 return
             if data.get("message_type") == "user_count":
+                if not page_alive: return
                 user_count_text.value = f"{data.get('count', 0)} online"
                 user_count_text.update()
                 return
@@ -367,10 +344,165 @@ async def main(page: ft.Page):
 
     page.pubsub.subscribe(on_pubsub_message)
 
+    # --- ADVANCED SEARCH (Ctrl+F Behavior) ---
+    async def jump_to_match(index):
+        if not state["search_matches"]: return
+        
+        # Wrap index
+        index = index % len(state["search_matches"])
+        state["active_search_index"] = index
+        
+        match = state["search_matches"][index]
+        query = search_box.value
+        try:
+            q_regex = re.escape(query)
+            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
+        except Exception: return
+
+        # Re-render ONLY bubbles that are in search_matches to show active highlight
+        temp_counter = [0]
+        unique_bubbles = {}
+        for m in state["search_matches"]:
+            # Last seen wins, but we want to know text/bubble association
+            unique_bubbles[m["bubble"]] = m["text"]
+
+        for bubble, text in unique_bubbles.items():
+            bubble.content = ft.Text(
+                spans=ui.generate_spans(text, page.launch_url, query_pattern=query_pattern, query_text=query, active_match_index=index, current_match_counter=temp_counter),
+                selectable=True,
+                size=15,
+                color=ui.TEXT_COLOR,
+                font_family="Roboto, sans-serif"
+            )
+
+        search_box.label = f"{index + 1} of {len(state['search_matches'])}"
+        search_box.update()
+        chat.update()
+        
+        try:
+            # Scroll to the control
+            await chat.scroll_to(key=match["control"].key, duration=300)
+        except Exception:
+            pass
+
+    async def perform_search(e):
+        query = search_box.value
+        if not query or len(query) < 2: return await clear_search(e)
+        
+        # If user hits Enter on same query, jump to next match
+        if query == state["last_search_query"] and state["search_matches"]:
+            await jump_to_match(state["active_search_index"] + 1)
+            return
+            
+        state["last_search_query"] = query
+        state["search_matches"] = []
+        state["active_search_index"] = -1
+        
+        try:
+            q_regex = re.escape(query)
+            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
+        except Exception: return
+
+        for control in reversed(chat.controls):
+            if isinstance(control, ft.Row) and len(control.controls) > 1:
+                bubble_container = None
+                for c in control.controls:
+                    if isinstance(c, ft.Container) and c.data:
+                        bubble_container = c
+
+                if bubble_container:
+                    original_text = bubble_container.data
+                    if query.lower() in original_text.lower():
+                        count_in_msg = len(query_pattern.findall(original_text))
+                        for _ in range(count_in_msg):
+                            state["search_matches"].append({
+                                "control": control,
+                                "bubble": bubble_container,
+                                "text": original_text
+                            })
+                    else:
+                        # Revert non-matches to original content if they were text spans (clears old highlights)
+                        if isinstance(bubble_container.content, ft.Text) and bubble_container.content.spans:
+                            bubble_container.content = ui.create_message_content(
+                                original_text,
+                                trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
+                                on_tap_link=page.launch_url
+                            )
+
+        if state["search_matches"]:
+            await jump_to_match(0)
+        else:
+            search_box.label = "0 matches"
+            search_box.update()
+            chat.update()
+
+    async def clear_search(e):
+        state["last_search_query"] = ""
+        state["search_matches"] = []
+        state["active_search_index"] = -1
+        search_box.value = ""
+        search_box.label = "Search"
+        
+        # Reset highlights on all controls without clearing the chat
+        for control in chat.controls:
+            if isinstance(control, ft.Row) and len(control.controls) > 1:
+                # Find the bubble container
+                for c in control.controls:
+                    if isinstance(c, ft.Container) and c.data:
+                        # Revert to standard markdown/text content
+                        c.content = ui.create_message_content(
+                            c.data,
+                            trigger_copy_callback=lambda cb: page.run_task(trigger_copy_snack, cb),
+                            on_tap_link=page.launch_url
+                        )
+
+        if page_alive:
+            search_box.update()
+            chat.update()
+            page.update()
+
+    async def on_key(e: ft.KeyboardEvent):
+        # Hotkey: Ctrl+F
+        if e.ctrl and e.key.lower() == "f":
+            search_box.focus()
+            search_box.update()
+        elif e.key == "Escape":
+            await clear_search(None)
+        elif e.key == "Enter" and state["search_focused"]:
+            if state["search_matches"]:
+                await jump_to_match(state["active_search_index"] + 1)
+            else:
+                await perform_search(None)
+
+    page.on_keyboard_event = on_key
+
+    search_box = ft.TextField(
+        label="Search",
+        width=300,
+        height=40,
+        content_padding=ft.padding.only(left=15, right=10, top=5),
+        border_radius=20,
+        bgcolor="#1e1f20",
+        border_width=0,
+        text_style=ft.TextStyle(color="white"),
+        label_style=ft.TextStyle(color="#8e918f"),
+        on_submit=perform_search,
+        on_focus=lambda _: state.__setitem__("search_focused", True),
+        on_blur=lambda _: state.__setitem__("search_focused", False),
+        suffix=ft.Row([
+            ft.IconButton(ft.Icons.KEYBOARD_ARROW_UP, icon_size=18, icon_color="#8e918f", 
+                          on_click=lambda _: page.run_task(jump_to_match, state["active_search_index"] - 1)),
+            ft.IconButton(ft.Icons.KEYBOARD_ARROW_DOWN, icon_size=18, icon_color="#8e918f", 
+                          on_click=lambda _: page.run_task(jump_to_match, state["active_search_index"] + 1)),
+            ft.IconButton(ft.Icons.CLOSE, icon_size=18, icon_color="#8e918f", on_click=clear_search),
+        ], tight=True, spacing=0)
+    )
+
     # --- TYPING INDICATOR LOGIC ---
     typing_text = ft.Text(value="", italic=True, color="#8e918f", size=12, visible=False)
 
     async def update_typing_ui():
+        if not page_alive: return
         if not settings["typing_enabled"]:
             if typing_text.visible:
                 typing_text.visible = False
@@ -424,10 +556,7 @@ async def main(page: ft.Page):
         new_message.value = ""
         page.update()
         try:
-            print(f"DEBUG: App sending message. text={txt[:20]}..., is_temp={state['is_temp_mode']}")
-            # Use to_thread to prevent blocking the UI loop
             await asyncio.to_thread(database.insert_message, state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
-
         except Exception as ex:
             print(f"Send Error: {ex}")
 
@@ -464,7 +593,6 @@ async def main(page: ft.Page):
                     if os.path.exists(full_path):
                         await asyncio.sleep(1)
                         try:
-                            # Upload to GCS (Offload blocking network call)
                             bucket = database.storage_client.bucket(database.BUCKET_NAME)
                             blob = bucket.blob(fname)
                             await asyncio.to_thread(blob.upload_from_filename, full_path)
@@ -490,101 +618,6 @@ async def main(page: ft.Page):
 
     file_picker.on_result = on_file_picked
 
-    # FilePicker moved to top of main
-
-
-    # --- SEARCH OPTIMIZED ---
-    async def perform_search(e):
-        query = search_box.value
-        if not query: return await clear_search(e)
-        
-        # Optimization: Don't re-run if query is identical
-        if query == state["last_search_query"]:
-            return
-        state["last_search_query"] = query
-        
-        # Pre-compile search pattern once
-        try:
-            q_regex = re.escape(query)
-            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
-        except Exception:
-            query_pattern = None
-
-        matches = 0
-        first_key = None
-        processed_count = 0
-        
-        for control in reversed(chat.controls):
-            processed_count += 1
-            if processed_count % 10 == 0:
-                await asyncio.sleep(0) # Yield for UI responsiveness
-
-            if isinstance(control, ft.Row) and len(control.controls) > 1:
-                bubble_container = None
-                for c in control.controls:
-                    if isinstance(c, ft.Container) and c.data:
-                        bubble_container = c
-
-                if bubble_container:
-                    original_text = bubble_container.data
-                    if query.lower() in original_text.lower():
-                        matches += 1
-                        if not first_key: first_key = control.key
-                        bubble_container.content = ft.Text(
-                            spans=ui.generate_spans(original_text, page.launch_url, query_pattern=query_pattern, query_text=query),
-                            selectable=True,
-                            size=15,
-                            color="#e3e3e3",
-                            font_family="Roboto, sans-serif"
-                        )
-                    else:
-                        # Selective re-rendering: Only revert if it was previously highlighted
-                        # This avoids expensive Markdown re-builds for non-matches
-                        if isinstance(bubble_container.content, ft.Text) and bubble_container.content.spans:
-                            bubble_container.content = ui.create_message_content(
-                                original_text,
-                                trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
-                                on_tap_link=page.launch_url
-                            )
-
-        chat.update()
-        search_box.label = f"{matches} matches"
-        search_box.update()
-        try:
-            # We remove 'key' as it is unsupported in this environment's Flet version.
-            # The search still highlights matches in the chat ListView.
-            if first_key: await chat.scroll_to(offset=0, duration=500)
-        except Exception as ex:
-            print(f"Search scroll failed: {ex}")
-
-    async def clear_search(e):
-        search_box.value = ""
-        search_box.label = "Search"
-        state["history_cursor"] = 0
-        chat.controls.clear()
-        await load_history_chunk()
-        page.update()
-
-    search_box = ft.TextField(
-        label="Search",
-        width=250,
-        height=40,
-        content_padding=ft.padding.only(left=15, right=10, top=5),
-        border_radius=20,
-        bgcolor="#1e1f20",
-        border_width=0,
-        text_style=ft.TextStyle(color="white"),
-        label_style=ft.TextStyle(color="#8e918f"),
-        on_submit=perform_search,
-        suffix=ft.Container(
-            content=ft.Icon(ft.Icons.CLOSE, size=16, color="#8e918f"),
-            on_click=clear_search,
-            padding=5,
-            ink=True,
-            border_radius=20
-        )
-    )
-
     # --- SETTINGS / ADMIN ---
     async def clear_database_click(e):
         if await asyncio.to_thread(database.clear_global_database):
@@ -595,7 +628,6 @@ async def main(page: ft.Page):
     def update_deja_vu(e):
         settings["deja_vu_enabled"] = deja_vu_switch.value
         database.DEJA_VU_ENABLED = settings["deja_vu_enabled"]
-        print(f"DEBUG: Deja Vu Enabled = {database.DEJA_VU_ENABLED}")
 
     typing_switch = ft.Switch(
         label="Typing Indicator",
@@ -624,19 +656,14 @@ async def main(page: ft.Page):
         session_avatar.visible = False
         session_name.visible = False
         logout_button.visible = False
-        
-        # Disable input when logged out
         new_message.disabled = True
         send_button.disabled = True
-        
         settings_sheet.open = False
         welcome_dlg.open = True
         page.update()
 
     logout_button = ft.ElevatedButton(
-        "Logout",
-        icon=ft.Icons.LOGOUT,
-        on_click=logout_click,
+        "Logout", icon=ft.Icons.LOGOUT, on_click=logout_click,
         style=ft.ButtonStyle(color="white", bgcolor="#D32F2F"),
         visible=True
     )
@@ -644,7 +671,7 @@ async def main(page: ft.Page):
     async def open_settings(e):
         uptime_text.value = database.get_uptime()
         settings_sheet.open = True
-        page.update()
+        settings_sheet.update()
 
     settings_sheet = ft.BottomSheet(
         ft.Container(
@@ -667,13 +694,9 @@ async def main(page: ft.Page):
     page.overlay.append(settings_sheet)
 
     settings_button = ft.IconButton(
-        icon=ft.Icons.SETTINGS,
-        icon_color="#c4c7c5",
-        on_click=open_settings,
-        tooltip="Settings",
-        scale=0.9
+        icon=ft.Icons.SETTINGS, icon_color="#c4c7c5",
+        on_click=open_settings, tooltip="Settings", scale=0.9
     )
-
 
     # --- HINTS & INPUT ---
     hint_choices = ["Ask anything...", "Type a message...", "Enter a prompt here..."]
@@ -681,9 +704,8 @@ async def main(page: ft.Page):
 
     async def toggle_timer(e):
         state["is_temp_mode"] = not state["is_temp_mode"]
-        print(f"DEBUG: Toggle Timer: is_temp_mode={state['is_temp_mode']}")
         if state["is_temp_mode"]:
-            timer_button.icon_color = "#f28b82"  # Pastel Red
+            timer_button.icon_color = "#f28b82"
             new_message.hint_text = "Temporary message (60s)..."
         else:
             timer_button.icon_color = "#c4c7c5"
@@ -692,10 +714,8 @@ async def main(page: ft.Page):
         new_message.update()
 
     timer_button = ft.IconButton(
-        icon=ft.Icons.TIMER,
-        icon_color="#c4c7c5",
-        on_click=toggle_timer,
-        tooltip="Toggle Temporary Message"
+        icon=ft.Icons.TIMER, icon_color="#c4c7c5",
+        on_click=toggle_timer, tooltip="Toggle Temporary Message"
     )
 
     new_message = ft.TextField(
@@ -714,24 +734,12 @@ async def main(page: ft.Page):
     )
 
     send_button = ft.IconButton(
-        icon=ft.Icons.SEND_ROUNDED,
-        icon_color="#e3e3e3",
-        on_click=on_send_click,
-        tooltip="Send message"
+        icon=ft.Icons.SEND_ROUNDED, icon_color="#e3e3e3",
+        on_click=on_send_click, tooltip="Send message"
     )
 
     input_container = ft.Container(
-        content=ft.Row([
-            timer_button,
-            # ft.IconButton(
-            #     icon=ft.Icons.ADD_CIRCLE_OUTLINE,
-            #     icon_color="#c4c7c5",
-            #     tooltip="Upload Audio (Disabled)",
-            #     on_click=lambda _: file_picker.pick_files(allow_multiple=False, file_type=ft.FilePickerFileType.AUDIO)
-            # ),
-            new_message,
-            send_button
-        ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+        content=ft.Row([timer_button, new_message, send_button], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         bgcolor="#1e1f20",
         border_radius=32,
         padding=5,
@@ -740,7 +748,6 @@ async def main(page: ft.Page):
 
     async def join_chat_click(e):
         try:
-            print(f"DEBUG: join_chat_click starting for {join_user_name.value}")
             if not join_user_name.value:
                 join_user_name.error_text = "Name cannot be blank!"
                 join_user_name.update()
@@ -751,8 +758,6 @@ async def main(page: ft.Page):
                 page.client_storage.set("user_name", state["user_name"])
 
             welcome_dlg.open = False
-            
-            # Enable input when logged in
             new_message.disabled = False
             send_button.disabled = False
             
@@ -763,29 +768,23 @@ async def main(page: ft.Page):
             logout_button.visible = True
             page.update()
 
-            # FETCH FULL HISTORY in background
-            print("DEBUG: join_chat_click fetching history...")
             state["full_history"] = await asyncio.to_thread(database.get_recent_messages)
             state["history_cursor"] = 0
             chat.controls.clear()
             message_controls.clear()
-            
-            print("DEBUG: join_chat_click loading chunk...")
             await load_history_chunk()
             page.update()
-            
-            # Scroll to bottom (since index 0 is newest and reverse=True, this is offset 0)
             await scroll_to_bottom(instant=True)
             
-            try:
-                await asyncio.to_thread(database.insert_message, state["user_name"], f"{state['user_name']} joined", "login_message")
-            except Exception as e:
-                print(f"DEBUG: Join notification error: {e}")
-            print("DEBUG: join_chat_click finished.")
+            if e is not None:
+                # Manual join - send the message
+                try:
+                    join_text = f"{state['user_name']} has joined"
+                    await asyncio.to_thread(database.insert_message, state["user_name"], join_text, "login_message")
+                except Exception: 
+                    pass
         except Exception as e:
             print(f"CRITICAL: join_chat_click FAILED: {e}")
-            import traceback
-            traceback.print_exc()
 
     # --- LOGIN DIALOG ---
     join_user_name = ft.TextField(
@@ -797,7 +796,6 @@ async def main(page: ft.Page):
         on_submit=join_chat_click,
         autofocus=True
     )
-
 
     welcome_dlg = ft.AlertDialog(
         modal=True,
@@ -831,7 +829,7 @@ async def main(page: ft.Page):
             mobile_search_btn.icon = ft.Icons.CLOSE
             user_session_info.visible = False
             user_count_text.visible = False
-            search_box.focus() # Ensure it's ready to type
+            search_box.focus()
         else:
             mobile_search_btn.icon = ft.Icons.SEARCH
             user_session_info.visible = True
@@ -851,20 +849,13 @@ async def main(page: ft.Page):
         content=ft.Row([
             ft.Row([user_session_info, ft.Container(width=5), user_count_text], 
                    alignment=ft.MainAxisAlignment.START, tight=True, expand=True),
-            ft.Row([
-                mobile_search_btn,
-                search_box,
-                settings_button
-            ], alignment=ft.MainAxisAlignment.END, tight=True)
+            ft.Row([mobile_search_btn, search_box, settings_button], alignment=ft.MainAxisAlignment.END, tight=True)
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
         padding=ft.padding.only(left=10, right=10, top=10, bottom=0),
         bgcolor=ui.PAGE_BG,
-        height=50 # Explicit height to ensure it doesn't jump
+        height=50
     )
 
-
-
-    # Stack for Bottom-Left Toast Notification
     main_layout = ft.Column(
         controls=[
             header,
@@ -872,28 +863,17 @@ async def main(page: ft.Page):
                 chat_container,
                 ft.Container(content=scroll_down_button, bottom=10, right=45)
             ], expand=True),
-
             ft.Container(content=typing_text, padding=ft.padding.only(left=40, bottom=5)),
-
             input_container
         ], expand=True, spacing=0
     )
 
-    page.add(
-        ft.Stack(
-            [
-                main_layout,
-                copy_banner
-            ],
-            expand=True
-        )
-    )
+    page.add(ft.Stack([main_layout, copy_banner], expand=True))
 
     if stored_user and stored_user.strip():
         join_user_name.value = stored_user
-        await join_chat_click(None)
+        page.run_task(join_chat_click, None)
     else:
-        # Ensure input is disabled if not joined
         new_message.disabled = True
         send_button.disabled = True
         welcome_dlg.open = True
@@ -901,10 +881,7 @@ async def main(page: ft.Page):
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 9090))
-    # Always run in web mode per user request
-    # host_addr: 0.0.0.0 for Cloud Run, 127.0.0.1 (localhost) for local development
-    host_addr = "0.0.0.0" if os.getenv("K_SERVICE") else "127.0.0.1"
-    
+    host_addr = "0.0.0.0"
     ft.app(
         target=main,
         port=port,

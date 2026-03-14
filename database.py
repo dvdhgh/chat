@@ -311,7 +311,7 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
     new_uid = str(uuid.uuid4())
 
     # DÉJÀ VU CHECK (Firestore Version) - MOVED TO ASYNC THREAD TO AVOID BLOCKING
-    if message_type == "chat_message" and text and len(text) > 15:
+    if DEJA_VU_ENABLED and message_type == "chat_message" and text and len(text) > 15:
         threading.Thread(target=_check_deja_vu_async, args=(text, now_obj, ui_ts), daemon=True).start()
 
     # Write to Firestore
@@ -374,9 +374,9 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
 def _check_deja_vu_async(text, now_obj, ui_ts):
     try:
         # Query Firestore for duplicates
-        # Note: If this requires a composite index, it might still fail, 
-        # but at least it won't block the main chat.
-        docs = db.collection("messages").where(filter=firestore.FieldFilter("text", "==", text)).order_by("timestamp", direction=firestore.Query.ASCENDING).limit(1).stream(timeout=5.0)
+        # Optimization: Removed order_by("timestamp") to avoid requiring a composite index
+        # which can cause 10s timeouts on new projects.
+        docs = db.collection("messages").where(filter=firestore.FieldFilter("text", "==", text)).limit(1).stream(timeout=5.0)
         for doc in docs:
             ddata = doc.to_dict()
             past_user = ddata.get("user_name")

@@ -12,7 +12,9 @@ SUB_TEXT = "#c4c7c5"  # Secondary text (headers, names)
 # --- PRE-COMPILED PATTERNS ---
 URL_PATTERN = re.compile(r"((?:https?://|www\.)\S+)", re.IGNORECASE)
 
-def generate_spans(text, on_link_click, query_pattern=None, query_text=None):
+def generate_spans(text, on_link_click, query_pattern=None, query_text=None, active_match_index=None, current_match_counter=None):
+    if current_match_counter is None:
+        current_match_counter = [0]
     spans = []
     if not text: return spans
 
@@ -35,8 +37,16 @@ def generate_spans(text, on_link_click, query_pattern=None, query_text=None):
                 for sub in sub_parts:
                     if not sub: continue
                     if sub.lower() == query_text.lower():
-                        spans.append(ft.TextSpan(text=sub, style=ft.TextStyle(bgcolor="#F9A825",
-                                                                              color="white")))
+                        # Highlight logic
+                        is_active = (active_match_index is not None and current_match_counter[0] == active_match_index)
+                        bg_color = "#FFFFFF" if is_active else "#F9A825"
+                        text_color = "black" if is_active else "white"
+                        
+                        spans.append(ft.TextSpan(
+                            text=sub, 
+                            style=ft.TextStyle(bgcolor=bg_color, color=text_color, weight="bold" if is_active else None)
+                        ))
+                        current_match_counter[0] += 1
                     else:
                         spans.append(ft.TextSpan(text=sub))
             else:
