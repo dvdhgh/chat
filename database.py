@@ -3,7 +3,7 @@ import time
 import threading
 import uuid
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import socket
 from google import genai
 from google.cloud import firestore
@@ -56,12 +56,11 @@ buffer_start_time = 0.0
 buffer_lock = threading.Lock()
 
 local_sessions = set()
-typing_status = {}
 DECAY_TIMEOUT = 3.0
 
 # --- DATA MODEL ---
 class Message:
-    def __init__(self, user_name, text, message_type, timestamp, uid, audio_data=None, db_id=None):
+    def __init__(self, user_name, text, message_type, timestamp, uid, audio_data=None, db_id=None, is_temp=False):
         self.user_name = user_name
         self.text = text
         self.message_type = message_type
@@ -69,11 +68,13 @@ class Message:
         self.uid = uid
         self.audio_data = audio_data
         self.db_id = db_id
+        self.is_temp = is_temp
 
     def to_dict(self):
         return {
             "user_name": self.user_name, "text": self.text, "message_type": self.message_type,
-            "timestamp": self.timestamp, "uid": self.uid, "audio_data": self.audio_data, "db_id": self.db_id
+            "timestamp": self.timestamp, "uid": self.uid, "audio_data": self.audio_data, 
+            "db_id": self.db_id, "is_temp": self.is_temp
         }
 
 def register_session(pubsub):
@@ -87,15 +88,15 @@ def broadcast(message_data):
     if not local_sessions:
         return
     def _do_broadcast():
-        # Copy the sessions to avoid "set changed size during iteration" errors
+        # Flet's pubsub.send_all already broadcasts to all subscribers.
+        # We try until one session succeeds in triggering the broadcast.
         sessions = list(local_sessions)
         for session in sessions:
             try:
                 session.send_all(message_data)
+                return # Successfully triggered
             except Exception as e:
-                # If a session fails, unregister it locally to prevent future failures
-                if session in local_sessions:
-                    local_sessions.remove(session)
+                print(f"DEBUG: Broadcast trigger failed for a session: {e}")
     threading.Thread(target=_do_broadcast, daemon=True).start()
 
 # --- FIRESTORE LISTENERS ---
@@ -177,7 +178,7 @@ def init_db():
     
     # Start Real-time Listeners in background thread to avoid blocking main thread
     def start_listeners():
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         print("Backend: Starting Firestore Listeners...")
         try:
             db.collection("messages").where(filter=firestore.FieldFilter("timestamp", ">", now)).on_snapshot(on_messages_snapshot)
@@ -198,7 +199,7 @@ def _signal_cleanup_loop():
     while True:
         time.sleep(30)
         try:
-            limit_time = datetime.now() - timedelta(seconds=10)
+            limit_time = datetime.now(timezone.utc) - timedelta(seconds=10)
             # Find old signals
             old_signals = db.collection("typing_signals").where(filter=firestore.FieldFilter("timestamp", "<", limit_time)).stream()
             
@@ -226,7 +227,7 @@ def _write_typing_signal(user_name):
     try:
         db.collection("typing_signals").add({
             "user_name": user_name,
-            "timestamp": datetime.now()
+            "timestamp": datetime.now(timezone.utc)
         })
     except Exception as e:
         print(f"Typing Signal Insert Error: {e}")
@@ -274,7 +275,7 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
                 "user_name": "SYSTEM",
                 "text": f"Observer Lens shifted to: {new_lens}",
                 "message_type": "login_message",
-                "timestamp": datetime.now().strftime("%H:%M"),
+                "timestamp": datetime.now(timezone.utc).strftime("%H:%M"),
                 "uid": str(uuid.uuid4())
             })
             return
@@ -295,7 +296,7 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
                         "user_name": "SYSTEM",
                         "text": f"Capsule sealed. Opening in {duration_str}...",
                         "message_type": "login_message",
-                        "timestamp": datetime.now().strftime("%H:%M"),
+                        "timestamp": datetime.now(timezone.utc).strftime("%H:%M"),
                         "uid": str(uuid.uuid4())
                     })
                     threading.Timer(delay_seconds, insert_message,
@@ -305,7 +306,7 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
             print(f"Capsule Error: {e}")
 
     # --- 2. CORE: DB INSERTION (Firestore) ---
-    now_obj = datetime.now()
+    now_obj = datetime.now(timezone.utc)
     ui_ts = now_obj.strftime("%H:%M")
     new_uid = str(uuid.uuid4())
 
@@ -325,7 +326,8 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
                 "timestamp": ui_ts,
                 "uid": new_uid,
                 "audio_data": audio_payload,
-                "db_id": None
+                "db_id": None,
+                "is_temp": is_temp
             })
         
         doc_ref = db.collection("messages").document()
@@ -340,9 +342,25 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
         
         if is_temp:
             print(f"DEBUG: Setting expiry for temporary message {new_uid}")
-            base_data["expires_at"] = now_obj + timedelta(seconds=60)
+            base_data["expires_at"] = now_obj.astimezone(timezone.utc) + timedelta(seconds=60)
+            
+            # OPTIMISTIC BROADCAST: For temporary messages, we broadcast immediately
+            # to ensure the sender (especially on flaky mobile) sees the message instantly.
+            broadcast({
+                "user_name": user_name,
+                "text": text,
+                "message_type": message_type,
+                "timestamp": ui_ts,
+                "uid": new_uid,
+                "audio_data": audio_payload,
+                "db_id": None
+            })
             
         doc_ref.set(base_data)
+        
+        if is_temp:
+            print(f"DEBUG: Starting delete_later thread for {doc_ref.id}")
+            threading.Thread(target=delete_later, args=(doc_ref.id, 60, new_uid), daemon=True).start()
     except Exception as e:
         print(f"CRITICAL: Firestore Insert Failed: {e}")
 
@@ -367,8 +385,8 @@ def insert_message(user_name, text, message_type, is_temp=False, audio_payload=N
                     threading.Thread(target=_run_gemini_background, args=(transcript_snapshot,), daemon=True).start()
 
     if is_temp:
-        print(f"DEBUG: Starting delete_later thread for {new_uid}")
-        threading.Thread(target=delete_later, args=(new_uid, 60), daemon=True).start()
+        # The delete_later thread is now started AFTER doc_ref.set() to get the actual doc ID
+        pass
 
 def _check_deja_vu_async(text, now_obj, ui_ts):
     try:
@@ -394,23 +412,16 @@ def _check_deja_vu_async(text, now_obj, ui_ts):
     except Exception as e:
         print(f"Deja Vu Error: {e}")
 
-def delete_later(uid, delay):
-    print(f"DEBUG: delete_later called for {uid} with delay {delay}")
+def delete_later(doc_id, delay, uid):
+    print(f"DEBUG: delete_later called for doc {doc_id} (uid {uid}) with delay {delay}")
     time.sleep(delay)
-    # Firestore delete
+    # Firestore delete by ID is O(1) and extremely reliable
     try:
-        print(f"DEBUG: Attempting Firestore deletion for {uid}")
-        docs = db.collection("messages").where(filter=firestore.FieldFilter("uid", "==", uid)).stream()
-        found = False
-        for doc in docs:
-            doc.reference.delete()
-            print(f"DEBUG: Deleted document {doc.id} for UID {uid}")
-            found = True
-        if not found:
-            print(f"DEBUG: No document found for UID {uid} during deletion")
+        print(f"DEBUG: Attempting direct Firestore deletion for {doc_id}")
+        db.collection("messages").document(doc_id).delete()
+        print(f"DEBUG: Successfully deleted document {doc_id}")
     except Exception as e:
-        print(f"DEBUG: Error in delete_later for {uid}: {e}")
-        pass
+        print(f"DEBUG: Error deleting document {doc_id}: {e}")
     broadcast({"message_type": "delete_message", "uid": uid})
 
 def get_recent_messages(limit=50):
@@ -420,14 +431,15 @@ def get_recent_messages(limit=50):
         # Get latest 50 messages ordered by timestamp
         docs = db.collection("messages").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit).stream(timeout=5.0)
         
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         for doc in docs:
             r = doc.to_dict()
             
             # Check for expiration
             expires_at = r.get("expires_at")
-            if expires_at and hasattr(expires_at, "replace"):
-                if expires_at.replace(tzinfo=None) < now:
+            if expires_at:
+                # Ensure we comparison in UTC
+                if expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
                     print(f"DEBUG: Skipping expired message {r.get('uid')}")
                     continue
 
@@ -439,7 +451,8 @@ def get_recent_messages(limit=50):
             else:
                 final_ts = str(raw_ts)
 
-            messages.append(Message(r["user_name"], r["text"], r["message_type"], final_ts, r["uid"], r.get("audio_data"), doc.id))
+            is_msg_temp = bool(r.get("expires_at"))
+            messages.append(Message(r["user_name"], r["text"], r["message_type"], final_ts, r["uid"], r.get("audio_data"), doc.id, is_temp=is_msg_temp))
         
         print(f"DATABASE: get_recent_messages - Successfully retrieved {len(messages)} messages.")
         # NO REVERSE: We want index 0 to be the NEWEST message
@@ -471,7 +484,8 @@ def fetch_message_with_retry(db_id):
                 final_ts = raw_ts.strftime("%H:%M")
             else:
                 final_ts = str(raw_ts)
-            return Message(r["user_name"], r["text"], r["message_type"], final_ts, r["uid"], r.get("audio_data"), doc.id)
+            is_msg_temp = bool(r.get("expires_at"))
+            return Message(r["user_name"], r["text"], r["message_type"], final_ts, r["uid"], r.get("audio_data"), doc.id, is_temp=is_msg_temp)
     except:
         pass
     return None

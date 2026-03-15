@@ -1,4 +1,6 @@
-# LDN Chat Version: v3.10.0 (Feature: Déjà Vu Toggle + Code Polish)
+# LDN Chat Version: v3.10.6 (Mandatory High Performance Mode)
+# CRITICAL: High Performance Mode (Light Mode) is now the mandatory baseline.
+# Avoid using ft.Markdown or other heavy UI controls for messages to maintain mobile responsiveness.
 import flet as ft
 import os
 import time
@@ -26,7 +28,8 @@ async def main(page: ft.Page):
     # --- APP SETTINGS & STATE ---
     settings = {
         "typing_enabled": True,
-        "deja_vu_enabled": False  # DEFAULT: OFF to save costs
+        "deja_vu_enabled": False,  # DEFAULT: OFF to save costs
+        "light_mode": True         # FORCE: High Performance Mode
     }
 
     # Sync initial state to backend
@@ -44,7 +47,8 @@ async def main(page: ft.Page):
         "search_matches": [],
         "active_search_index": -1,
         "search_focused": False,
-        "is_mobile_last": None # Track resize threshold
+        "is_mobile_last": None, # Track resize threshold
+        "typing_status": {}    # Per-session typing state
     }
 
     # Optimization: O(1) lookup for message controls
@@ -211,11 +215,16 @@ async def main(page: ft.Page):
                     state["user_name"], 
                     trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
                     on_tap_link=page.launch_url,
-                    play_audio_callback=play_audio_message
+                    play_audio_callback=play_audio_message,
+                    light_mode=settings["light_mode"]
                 )
                 if m:
                     message_controls[str(msg.uid)] = m
                     new_controls.append(m)
+                    
+                    # START FALLBACK TIMER FOR HISTORY (if still active)
+                    if msg.is_temp:
+                         page.run_task(client_side_expiry_task, str(msg.uid))
             except Exception as e:
                 print(f"DEBUG: Error creating message {msg.uid}: {e}")
 
@@ -262,9 +271,14 @@ async def main(page: ft.Page):
     # NOTE: This message/typing signal logic is the "sweet spot" for mobile performance.
     # Do not add redundant broadcasts or forced animations on mobile devices.
     async def handle_incoming_message(data, update_page=True):
-        msg = database.Message(**data)
+        if isinstance(data, database.Message):
+            msg = data
+        else:
+            msg = database.Message(**{k: v for k, v in data.items() if k != "is_temp"})
+            msg.is_temp = data.get("is_temp", False)
         
-        # Sync with local full_history so reloads (like after search) don't lose messages
+        is_temp = msg.is_temp
+        uid_str = str(msg.uid)
         if not any(m.uid == msg.uid for m in state["full_history"]):
             state["full_history"].insert(0, msg)
             if len(state["full_history"]) > 500: # Optional cap
@@ -277,7 +291,8 @@ async def main(page: ft.Page):
             state["user_name"], 
             trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
             on_tap_link=page.launch_url,
-            play_audio_callback=play_audio_message
+            play_audio_callback=play_audio_message,
+            light_mode=settings["light_mode"]
         )
         
         if uid_str in message_controls:
@@ -289,8 +304,8 @@ async def main(page: ft.Page):
                 chat.controls.insert(0, m)
         else:
             chat.controls.insert(0, m)
-            if msg.user_name in database.typing_status:
-                del database.typing_status[msg.user_name]
+            if msg.user_name in state["typing_status"]:
+                del state["typing_status"][msg.user_name]
 
         if len(chat.controls) > 200:
             removed = chat.controls.pop()
@@ -309,6 +324,10 @@ async def main(page: ft.Page):
 
                 # update_typing_ui is now throttled by the fact that database.py only sends one signal
                 page.run_task(update_typing_ui)
+
+                # CLIENT-SIDE FALLBACK TIMER
+                if is_temp:
+                    page.run_task(client_side_expiry_task, uid_str)
             except Exception as ex:
                 print(f"DEBUG: UI Update suppressed (likely closed): {ex}")
                 pass
@@ -327,6 +346,10 @@ async def main(page: ft.Page):
             if data.get("message_type") == "delete_message":
                 if not page_alive: return
                 uid_to_delete = str(data.get("uid"))
+                
+                # Sync with local history to prevent reappearing after re-renders
+                state["full_history"] = [m for m in state["full_history"] if str(m.uid) != uid_to_delete]
+                
                 if uid_to_delete in message_controls:
                     control = message_controls.pop(uid_to_delete)
                     try:
@@ -339,7 +362,7 @@ async def main(page: ft.Page):
                 if not page_alive: return
                 u_name = data.get("user_name")
                 if settings["typing_enabled"] and u_name != state["user_name"]:
-                    database.typing_status[u_name] = time.time()
+                    state["typing_status"][u_name] = time.time()
                     page.run_task(update_typing_ui)
                 return
             if data.get("message_type") == "user_count":
@@ -374,7 +397,7 @@ async def main(page: ft.Page):
                 typing_text.update()
             return
         now = time.time()
-        active = [u for u, ts in database.typing_status.items()
+        active = [u for u, ts in state["typing_status"].items()
                   if now - ts < database.DECAY_TIMEOUT
                   and u != state["user_name"]]
         new_value = ""
@@ -394,6 +417,57 @@ async def main(page: ft.Page):
             if typing_text.visible: await update_typing_ui()
 
     page.run_task(typing_cleanup_loop)
+
+    # --- KEEP-ALIVE HEARTBEAT (Mobile Stability) ---
+    async def page_heartbeat():
+        """UI cleanup and keep-alive. Force syncs chat controls with state history."""
+        while page_alive:
+            await asyncio.sleep(15) 
+            try:
+                # 1. ORPHAN CLEANUP: Remove UI controls that are no longer in state history
+                history_uids = {str(m.uid) for m in state["full_history"]}
+                ui_uids = list(message_controls.keys())
+                
+                orphans_found = False
+                for uid in ui_uids:
+                    if uid not in history_uids:
+                        print(f"DEBUG: Heartbeat found orphan UI control {uid}. Removing...")
+                        control = message_controls.pop(uid)
+                        try:
+                            chat.controls.remove(control)
+                            orphans_found = True
+                        except:
+                            pass
+                
+                if orphans_found:
+                    chat.update()
+
+                # 2. KEEP-ALIVE
+                page.update()
+            except:
+                pass
+    
+    page.run_task(page_heartbeat)
+
+    # --- SHARED TASKS ---
+    async def client_side_expiry_task(target_uid):
+        """Resilient fallback timer that handles mobile backgrounding better than a single sleep."""
+        print(f"DEBUG: Client-side fallback timer started for {target_uid}")
+        start_ts = time.time()
+        expiry_duration = 65 # 60s + buffer
+        
+        while page_alive and (time.time() - start_ts < expiry_duration):
+            await asyncio.sleep(5) # Small steps to survive throttling
+            
+        if target_uid in message_controls:
+            print(f"DEBUG: Client-side fallback EXPIRED for {target_uid}")
+            control = message_controls.pop(target_uid)
+            state["full_history"] = [m for m in state["full_history"] if str(m.uid) != target_uid]
+            try:
+                chat.controls.remove(control)
+                chat.update()
+            except:
+                pass
 
     # --- INPUT HANDLERS ---
     async def on_send_click(e):

@@ -1,3 +1,5 @@
+# CRITICAL: Always prioritize mobile performance. 
+# Use ft.Text instead of ft.Markdown for message content by default (Light Mode).
 import flet as ft
 import re
 import database
@@ -116,7 +118,7 @@ def create_message_content(text, trigger_copy_callback, on_tap_link):
 
     return get_message_markdown(text, on_tap_link)
 
-def create_chat_message(message: database.Message, current_user_name, trigger_copy_callback, on_tap_link, play_audio_callback):
+def create_chat_message(message: database.Message, current_user_name, trigger_copy_callback, on_tap_link, play_audio_callback, light_mode=True):
     u_name = message.user_name if message.user_name else "Unknown"
     is_me = u_name == current_user_name
 
@@ -127,19 +129,28 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
             controls=[ft.Text(value=message.text, size=11, color="#8e918f", italic=True)]
         )
 
-    if message.message_type == "analysis_message" or u_name == "ARCHIVE":
-        return ft.Row(
-            key=str(message.uid),
-            vertical_alignment=ft.CrossAxisAlignment.START,
-            controls=[
-                ft.Icon(ft.Icons.AUTO_AWESOME, color=SUB_TEXT, size=20),
-                ft.Container(width=10),
-                ft.Column(
-                    expand=True,
-                    controls=[create_message_content(message.text, trigger_copy_callback, on_tap_link)]
-                )
-            ]
-        )
+    if (message.message_type == "analysis_message" or u_name == "ARCHIVE"):
+        if light_mode:
+            content_control = ft.Text(
+                value=f"--- {u_name} ANALYSIS ---\n{message.text}", 
+                size=14, color=SUB_TEXT, selectable=True
+            )
+        else:
+            return ft.Row(
+                key=str(message.uid),
+                vertical_alignment=ft.CrossAxisAlignment.START,
+                controls=[
+                    ft.Icon(ft.Icons.AUTO_AWESOME, color=SUB_TEXT, size=20),
+                    ft.Container(width=10),
+                    ft.Column(
+                        expand=True,
+                        controls=[create_message_content(message.text, trigger_copy_callback, on_tap_link)]
+                    )
+                ]
+            )
+    else:
+        # Standard logic
+        pass
 
     def get_avatar_color(user_name: str):
         if not user_name: user_name = "default"
@@ -170,69 +181,79 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
             )
 
     else:
-        is_code = message.text.strip().startswith("```")
-        is_long = len(message.text) > 400 or message.text.count('\n') > 10
-        is_markdown = any(char in message.text for char in ["*", "_", "`", "[", "#", "|"])
-
-        if is_code:
-            content_control = create_message_content(message.text, trigger_copy_callback, on_tap_link)
-        elif is_markdown:
-            content_control = get_message_markdown(message.text, on_tap_link)
-        else:
-            txt_control = ft.Text(
+        if light_mode:
+            # PERFORMANCE MODE: Use simple text spans even for long/code messages
+            content_control = ft.Text(
                 spans=generate_spans(message.text, on_tap_link),
                 selectable=True,
                 size=15,
                 color=TEXT_COLOR,
-                data=message.text,
-                font_family="Roboto, sans-serif",
-                weight=ft.FontWeight.W_400,
-                max_lines=10 if is_long else None,
-                overflow=ft.TextOverflow.ELLIPSIS if is_long else None,
+                font_family="Roboto, sans-serif"
             )
+        else:
+            is_code = message.text.strip().startswith("```")
+            is_long = len(message.text) > 400 or message.text.count('\n') > 10
+            is_markdown = any(char in message.text for char in ["*", "_", "`", "[", "#", "|"])
 
-            if is_long:
-                expand_btn = ft.IconButton(
-                    icon=ft.Icons.KEYBOARD_ARROW_DOWN,
-                    icon_color="#8e918f",
-                    icon_size=20,
-                    tooltip="Expand text",
-                    style=ft.ButtonStyle(padding=0, shape=ft.CircleBorder()),
-                    data=False
-                )
-
-                async def toggle_text(e):
-                    is_expanded = not expand_btn.data
-                    expand_btn.data = is_expanded
-                    if is_expanded:
-                        txt_control.max_lines = None
-                        txt_control.overflow = None
-                        expand_btn.icon = ft.Icons.KEYBOARD_ARROW_UP
-                    else:
-                        txt_control.max_lines = 10
-                        txt_control.overflow = ft.TextOverflow.ELLIPSIS
-                        expand_btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN
-                    txt_control.update()
-                    expand_btn.update()
-
-                expand_btn.on_click = toggle_text
-
-                content_control = ft.Row(
-                    vertical_alignment=ft.CrossAxisAlignment.START,
-                    controls=[
-                        ft.Container(content=txt_control, expand=True),
-                        ft.Container(content=expand_btn, padding=ft.padding.only(left=5))
-                    ]
-                )
+            if is_code:
+                content_control = create_message_content(message.text, trigger_copy_callback, on_tap_link)
+            elif is_markdown:
+                content_control = get_message_markdown(message.text, on_tap_link)
             else:
-                content_control = txt_control
+                txt_control = ft.Text(
+                    spans=generate_spans(message.text, on_tap_link),
+                    selectable=True,
+                    size=15,
+                    color=TEXT_COLOR,
+                    data=message.text,
+                    font_family="Roboto, sans-serif",
+                    weight=ft.FontWeight.W_400,
+                    max_lines=10 if is_long else None,
+                    overflow=ft.TextOverflow.ELLIPSIS if is_long else None,
+                )
+
+                if is_long:
+                    expand_btn = ft.IconButton(
+                        icon=ft.Icons.KEYBOARD_ARROW_DOWN,
+                        icon_color="#8e918f",
+                        icon_size=20,
+                        tooltip="Expand text",
+                        style=ft.ButtonStyle(padding=0, shape=ft.CircleBorder()),
+                        data=False
+                    )
+
+                    async def toggle_text(e):
+                        is_expanded = not expand_btn.data
+                        expand_btn.data = is_expanded
+                        if is_expanded:
+                            txt_control.max_lines = None
+                            txt_control.overflow = None
+                            expand_btn.icon = ft.Icons.KEYBOARD_ARROW_UP
+                        else:
+                            txt_control.max_lines = 10
+                            txt_control.overflow = ft.TextOverflow.ELLIPSIS
+                            expand_btn.icon = ft.Icons.KEYBOARD_ARROW_DOWN
+                        txt_control.update()
+                        expand_btn.update()
+
+                    expand_btn.on_click = toggle_text
+
+                    content_control = ft.Row(
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                        controls=[
+                            ft.Container(content=txt_control, expand=True),
+                            ft.Container(content=expand_btn, padding=ft.padding.only(left=5))
+                        ]
+                    )
+                else:
+                    content_control = txt_control
 
     # Standard Bubble Wrapper
     radius = ft.border_radius.only(
         top_left=18, top_right=2, bottom_right=18, bottom_left=18
     )
     # Narrower fallback for code/long messages (600px instead of 800px)
-    bubble_width = 600 if (is_long or is_code) else None
+    bubble_width = 600 if (not light_mode and (len(message.text) > 400 or message.text.count('\n') > 10 or message.text.strip().startswith("```"))) else None
 
     final_bubble = ft.Container(
         data=message.text,
