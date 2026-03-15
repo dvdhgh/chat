@@ -252,6 +252,7 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
         key=str(message.uid),
         vertical_alignment=ft.CrossAxisAlignment.START,
         alignment=ft.MainAxisAlignment.END if is_me else ft.MainAxisAlignment.START,
+        spacing=5, # Replaces the spacer container
         controls=[
             ft.CircleAvatar(
                 content=ft.Text(u_name[:1].upper(), color="#131314", weight="bold"),
@@ -259,7 +260,6 @@ def create_chat_message(message: database.Message, current_user_name, trigger_co
                 radius=14,
                 visible=not is_me
             ),
-            ft.Container(width=5, visible=not is_me),
             final_bubble
         ],
     )

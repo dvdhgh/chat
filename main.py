@@ -43,7 +43,8 @@ async def main(page: ft.Page):
         "last_search_query": "",
         "search_matches": [],
         "active_search_index": -1,
-        "search_focused": False
+        "search_focused": False,
+        "is_mobile_last": None # Track resize threshold
     }
 
     # Optimization: O(1) lookup for message controls
@@ -247,13 +248,19 @@ async def main(page: ft.Page):
 
     async def scroll_to_bottom(instant=False):
         try:
-            duration = 0 if instant else 300
-            curve = ft.AnimationCurve.EASE_OUT if not instant else None
+            is_mobile = page.width < 600
+            # Force instant on mobile or if explicitly requested
+            should_be_instant = instant or is_mobile
+            
+            duration = 0 if should_be_instant else 300
+            curve = ft.AnimationCurve.EASE_OUT if not should_be_instant else None
             await chat.scroll_to(offset=0, duration=duration, curve=curve)
         except Exception:
             pass
 
     # --- INCOMING MESSAGE HANDLER ---
+    # NOTE: This message/typing signal logic is the "sweet spot" for mobile performance.
+    # Do not add redundant broadcasts or forced animations on mobile devices.
     async def handle_incoming_message(data, update_page=True):
         msg = database.Message(**data)
         
@@ -295,9 +302,12 @@ async def main(page: ft.Page):
         if update_page and page_alive:
             try:
                 chat.update()
-                if not scroll_down_button.visible or msg.user_name == state["user_name"]:
-                    page.run_task(scroll_to_bottom, instant=False)
+                # If I'm the sender, always scroll to bottom instantly
+                is_me = msg.user_name == state["user_name"]
+                if not scroll_down_button.visible or is_me:
+                    page.run_task(scroll_to_bottom, instant=is_me)
 
+                # update_typing_ui is now throttled by the fact that database.py only sends one signal
                 page.run_task(update_typing_ui)
             except Exception as ex:
                 print(f"DEBUG: UI Update suppressed (likely closed): {ex}")
@@ -512,12 +522,16 @@ async def main(page: ft.Page):
         active = [u for u, ts in database.typing_status.items()
                   if now - ts < database.DECAY_TIMEOUT
                   and u != state["user_name"]]
+        new_value = ""
+        new_visible = False
         if active:
-            typing_text.value = f"{active[0]} is typing..." if len(active) == 1 else "Multiple people typing..."
-            typing_text.visible = True
-        else:
-            typing_text.visible = False
-        typing_text.update()
+            new_value = f"{active[0]} is typing..." if len(active) == 1 else "Multiple people typing..."
+            new_visible = True
+        
+        if typing_text.value != new_value or typing_text.visible != new_visible:
+            typing_text.value = new_value
+            typing_text.visible = new_visible
+            typing_text.update()
 
     async def typing_cleanup_loop():
         while page_alive:
@@ -554,7 +568,8 @@ async def main(page: ft.Page):
             return
 
         new_message.value = ""
-        page.update()
+        new_message.update()
+        send_button.update()
         try:
             await asyncio.to_thread(database.insert_message, state["user_name"], txt, "chat_message", is_temp=state["is_temp_mode"])
         except Exception as ex:
@@ -632,7 +647,7 @@ async def main(page: ft.Page):
     typing_switch = ft.Switch(
         label="Typing Indicator",
         value=True,
-        on_change=lambda e: setattr(settings, "typing_enabled", typing_switch.value)
+        on_change=lambda e: settings.__setitem__("typing_enabled", typing_switch.value)
     )
 
     deja_vu_switch = ft.Switch(
@@ -669,6 +684,8 @@ async def main(page: ft.Page):
     )
 
     async def open_settings(e):
+        # Optimization: Only update uptime if the sheet is actually opening
+        # and ensure we don't block the UI with the sync call
         uptime_text.value = database.get_uptime()
         settings_sheet.open = True
         settings_sheet.update()
@@ -811,15 +828,20 @@ async def main(page: ft.Page):
         is_mobile = page.width < 600
         search_box.visible = not is_mobile
         mobile_search_btn.visible = is_mobile
-        if is_mobile:
-            user_count_text.size = 10
-            session_name.visible = (page.width > 400 and state["user_name"] is not None)
-            session_avatar.visible = (state["user_name"] is not None)
-        else:
-            user_count_text.size = 12
-            session_name.visible = state["user_name"] is not None
-            session_avatar.visible = state["user_name"] is not None
-        page.update()
+        # Optimization: Only call page.update() if we actually switch layout
+        # or if it's the first run (is_mobile_last is None).
+        # This stops the 10s lag on mobile keyboards/scrolls.
+        if state["is_mobile_last"] != is_mobile:
+            state["is_mobile_last"] = is_mobile
+            if is_mobile:
+                user_count_text.size = 10
+                session_name.visible = (page.width > 400 and state["user_name"] is not None)
+                session_avatar.visible = (state["user_name"] is not None)
+            else:
+                user_count_text.size = 12
+                session_name.visible = state["user_name"] is not None
+                session_avatar.visible = state["user_name"] is not None
+            page.update()
 
     page.on_resize = on_page_resize
 

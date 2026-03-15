@@ -219,8 +219,7 @@ def _signal_cleanup_loop():
             print(f"Signal Cleanup Error: {e}")
 
 def send_typing_signal(user_name):
-    # Optimistic broadcast for local feel
-    broadcast({"message_type": "typing_signal", "user_name": user_name})
+    # Rely on Firestore listener for the broadcast to avoid double-signals
     threading.Thread(target=_write_typing_signal, args=(user_name,), daemon=True).start()
 
 def _write_typing_signal(user_name):
