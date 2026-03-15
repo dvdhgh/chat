@@ -10,7 +10,7 @@ import re
 import uuid
 import database  # Backend module
 import ui_components as ui
-# import flet_audio as fta # Temporarily disabled to isolate conflicts
+from search_ux import SearchUX
 
 print(f"DEBUG: Startup - Flet Version: {ft.__version__}")
 APP_VERSION = "v3.10.5 (Layout Tweaks)"
@@ -354,159 +354,14 @@ async def main(page: ft.Page):
 
     page.pubsub.subscribe(on_pubsub_message)
 
-    # --- ADVANCED SEARCH (Ctrl+F Behavior) ---
-    async def jump_to_match(index):
-        if not state["search_matches"]: return
-        
-        # Wrap index
-        index = index % len(state["search_matches"])
-        state["active_search_index"] = index
-        
-        match = state["search_matches"][index]
-        query = search_box.value
-        try:
-            q_regex = re.escape(query)
-            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
-        except Exception: return
-
-        # Re-render ONLY bubbles that are in search_matches to show active highlight
-        temp_counter = [0]
-        unique_bubbles = {}
-        for m in state["search_matches"]:
-            # Last seen wins, but we want to know text/bubble association
-            unique_bubbles[m["bubble"]] = m["text"]
-
-        for bubble, text in unique_bubbles.items():
-            bubble.content = ft.Text(
-                spans=ui.generate_spans(text, page.launch_url, query_pattern=query_pattern, query_text=query, active_match_index=index, current_match_counter=temp_counter),
-                selectable=True,
-                size=15,
-                color=ui.TEXT_COLOR,
-                font_family="Roboto, sans-serif"
-            )
-
-        search_box.label = f"{index + 1} of {len(state['search_matches'])}"
-        search_box.update()
-        chat.update()
-        
-        try:
-            # Scroll to the control
-            await chat.scroll_to(key=match["control"].key, duration=300)
-        except Exception:
-            pass
-
-    async def perform_search(e):
-        query = search_box.value
-        if not query or len(query) < 2: return await clear_search(e)
-        
-        # If user hits Enter on same query, jump to next match
-        if query == state["last_search_query"] and state["search_matches"]:
-            await jump_to_match(state["active_search_index"] + 1)
-            return
-            
-        state["last_search_query"] = query
-        state["search_matches"] = []
-        state["active_search_index"] = -1
-        
-        try:
-            q_regex = re.escape(query)
-            query_pattern = re.compile(f"({q_regex})", re.IGNORECASE)
-        except Exception: return
-
-        for control in reversed(chat.controls):
-            if isinstance(control, ft.Row) and len(control.controls) > 1:
-                bubble_container = None
-                for c in control.controls:
-                    if isinstance(c, ft.Container) and c.data:
-                        bubble_container = c
-
-                if bubble_container:
-                    original_text = bubble_container.data
-                    if query.lower() in original_text.lower():
-                        count_in_msg = len(query_pattern.findall(original_text))
-                        for _ in range(count_in_msg):
-                            state["search_matches"].append({
-                                "control": control,
-                                "bubble": bubble_container,
-                                "text": original_text
-                            })
-                    else:
-                        # Revert non-matches to original content if they were text spans (clears old highlights)
-                        if isinstance(bubble_container.content, ft.Text) and bubble_container.content.spans:
-                            bubble_container.content = ui.create_message_content(
-                                original_text,
-                                trigger_copy_callback=lambda c: page.run_task(trigger_copy_snack, c),
-                                on_tap_link=page.launch_url
-                            )
-
-        if state["search_matches"]:
-            await jump_to_match(0)
-        else:
-            search_box.label = "0 matches"
-            search_box.update()
-            chat.update()
-
-    async def clear_search(e):
-        state["last_search_query"] = ""
-        state["search_matches"] = []
-        state["active_search_index"] = -1
-        search_box.value = ""
-        search_box.label = "Search"
-        
-        # Reset highlights on all controls without clearing the chat
-        for control in chat.controls:
-            if isinstance(control, ft.Row) and len(control.controls) > 1:
-                # Find the bubble container
-                for c in control.controls:
-                    if isinstance(c, ft.Container) and c.data:
-                        # Revert to standard markdown/text content
-                        c.content = ui.create_message_content(
-                            c.data,
-                            trigger_copy_callback=lambda cb: page.run_task(trigger_copy_snack, cb),
-                            on_tap_link=page.launch_url
-                        )
-
-        if page_alive:
-            search_box.update()
-            chat.update()
-            page.update()
-
+    # --- SEARCH UX ---
+    search_ux = SearchUX(page, state, chat, trigger_copy_snack)
+    search_box = search_ux.search_box
+    
     async def on_key(e: ft.KeyboardEvent):
-        # Hotkey: Ctrl+F
-        if e.ctrl and e.key.lower() == "f":
-            search_box.focus()
-            search_box.update()
-        elif e.key == "Escape":
-            await clear_search(None)
-        elif e.key == "Enter" and state["search_focused"]:
-            if state["search_matches"]:
-                await jump_to_match(state["active_search_index"] + 1)
-            else:
-                await perform_search(None)
+        await search_ux.on_key(e)
 
     page.on_keyboard_event = on_key
-
-    search_box = ft.TextField(
-        label="Search",
-        width=300,
-        height=40,
-        content_padding=ft.padding.only(left=15, right=10, top=5),
-        border_radius=20,
-        bgcolor="#1e1f20",
-        border_width=0,
-        text_style=ft.TextStyle(color="white"),
-        label_style=ft.TextStyle(color="#8e918f"),
-        on_submit=perform_search,
-        on_focus=lambda _: state.__setitem__("search_focused", True),
-        on_blur=lambda _: state.__setitem__("search_focused", False),
-        suffix=ft.Row([
-            ft.IconButton(ft.Icons.KEYBOARD_ARROW_UP, icon_size=18, icon_color="#8e918f", 
-                          on_click=lambda _: page.run_task(jump_to_match, state["active_search_index"] - 1)),
-            ft.IconButton(ft.Icons.KEYBOARD_ARROW_DOWN, icon_size=18, icon_color="#8e918f", 
-                          on_click=lambda _: page.run_task(jump_to_match, state["active_search_index"] + 1)),
-            ft.IconButton(ft.Icons.CLOSE, icon_size=18, icon_color="#8e918f", on_click=clear_search),
-        ], tight=True, spacing=0)
-    )
 
     # --- TYPING INDICATOR LOGIC ---
     typing_text = ft.Text(value="", italic=True, color="#8e918f", size=12, visible=False)
