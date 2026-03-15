@@ -1,2 +1,2 @@
 # Chat App
-Pushing the local chat folder to this repository.
+A reinvention of Nineties chatrooms for 2026.
