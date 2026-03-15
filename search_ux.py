@@ -10,9 +10,17 @@ class SearchUX:
         self.chat = chat
         self.trigger_copy_snack = trigger_copy_snack
         
+        self.clear_button = ft.IconButton(
+            ft.Icons.CLOSE, 
+            icon_size=18, 
+            icon_color="#8e918f", 
+            on_click=self.clear_search,
+            visible=self.page.width >= 600
+        )
+        
         self.search_box = ft.TextField(
             label="Search",
-            width=300,
+            # width=300,  # Removed fixed width to allow responsive scaling
             height=40,
             content_padding=ft.padding.only(left=15, right=10, top=5),
             border_radius=20,
@@ -28,7 +36,7 @@ class SearchUX:
                               on_click=lambda _: self.page.run_task(self.jump_to_match, self.state["active_search_index"] - 1)),
                 ft.IconButton(ft.Icons.KEYBOARD_ARROW_DOWN, icon_size=18, icon_color="#8e918f", 
                               on_click=lambda _: self.page.run_task(self.jump_to_match, self.state["active_search_index"] + 1)),
-                ft.IconButton(ft.Icons.CLOSE, icon_size=18, icon_color="#8e918f", on_click=self.clear_search),
+                self.clear_button,
             ], tight=True, spacing=0)
         )
 

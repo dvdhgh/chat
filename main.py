@@ -231,14 +231,16 @@ async def main(page: ft.Page):
         print(f"DEBUG: load_history_chunk - adding {len(new_controls)} controls to chat.")
         chat.controls.extend(new_controls)
         
-        if len(chat.controls) > 200:
-            chat.controls = chat.controls[:200]
+        # Adaptive UI Buffer: 50 for mobile, 200 for desktop
+        cap_limit = 50 if page.width < 600 else 200
+        if len(chat.controls) > cap_limit:
+            chat.controls = chat.controls[:cap_limit]
 
         state["history_cursor"] = end_idx
         state["is_loading_history"] = False
         if page_alive:
             chat.update()
-            page.update()
+            # page.update() removed to avoid redundant layouts during history loading
 
     async def on_chat_scroll(e):
         try:
@@ -307,8 +309,11 @@ async def main(page: ft.Page):
             if msg.user_name in state["typing_status"]:
                 del state["typing_status"][msg.user_name]
 
-        if len(chat.controls) > 200:
+        # Adaptive UI Buffer: pop oldest messages if over limit
+        cap_limit = 50 if page.width < 600 else 200
+        if len(chat.controls) > cap_limit:
             removed = chat.controls.pop()
+            # Cleanup key-based tracking
             if hasattr(removed, 'key') and removed.key in message_controls:
                 del message_controls[removed.key]
         
@@ -755,22 +760,41 @@ async def main(page: ft.Page):
     # --- PAGE RESPONSIVENESS ---
     def on_page_resize(e):
         is_mobile = page.width < 600
-        search_box.visible = not is_mobile
-        mobile_search_btn.visible = is_mobile
-        # Optimization: Only call page.update() if we actually switch layout
-        # or if it's the first run (is_mobile_last is None).
-        # This stops the 10s lag on mobile keyboards/scrolls.
+        
+        # Optimization: Only update layout if we actually switch layout
         if state["is_mobile_last"] != is_mobile:
             state["is_mobile_last"] = is_mobile
+            
+            # Reset search bar visibility when flipping between desktop/mobile
+            search_box.visible = not is_mobile
+            mobile_search_btn.visible = is_mobile
+            
+            # Reset header icons to default state when switching layouts
+            mobile_search_btn.icon = ft.Icons.SEARCH
+            user_session_info.visible = True
+            user_count_text.visible = True
+            
             if is_mobile:
                 user_count_text.size = 10
                 session_name.visible = (page.width > 400 and state["user_name"] is not None)
                 session_avatar.visible = (state["user_name"] is not None)
+                search_ux.clear_button.visible = False
+                # Dynamically set width to prevent eclipsing header icons
+                search_box.width = page.width - 120 
+                if search_ux.clear_button.page: search_ux.clear_button.update()
             else:
                 user_count_text.size = 12
                 session_name.visible = state["user_name"] is not None
                 session_avatar.visible = state["user_name"] is not None
+                search_ux.clear_button.visible = True
+                search_box.width = 300
+                if search_ux.clear_button.page: search_ux.clear_button.update()
             page.update()
+        else:
+            # If we are already in mobile mode, ensure session info respects search state
+            if is_mobile:
+                session_name.visible = (page.width > 400 and state["user_name"] is not None and not search_box.visible)
+                page.update()
 
     page.on_resize = on_page_resize
 
@@ -780,11 +804,13 @@ async def main(page: ft.Page):
             mobile_search_btn.icon = ft.Icons.CLOSE
             user_session_info.visible = False
             user_count_text.visible = False
-            search_box.focus()
+            # Fix: Await focus to prevent RuntimeWarning
+            await search_box.focus_async() if hasattr(search_box, "focus_async") else search_box.focus()
         else:
             mobile_search_btn.icon = ft.Icons.SEARCH
             user_session_info.visible = True
             user_count_text.visible = True
+            await search_ux.clear_search(None)
         page.update()
 
     mobile_search_btn = ft.IconButton(
